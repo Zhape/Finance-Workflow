@@ -51,7 +51,7 @@
 	const notice = $derived($page.url.searchParams.get('connected'));
 	const callbackError = $derived($page.url.searchParams.get('error'));
 	const allConnected = $derived(
-		loaded && SLOTS.every((s) => connections.some((c) => c.name === s.name))
+		loaded && SLOTS.every((s) => connections.some((c) => c.name === s.name && c.provider === 'xero'))
 	);
 
 	onMount(async () => {
@@ -80,7 +80,12 @@
 		loaded = true;
 	}
 
-	const connectedTo = (name) => connections.find((c) => c.name === name);
+	// Match on provider too. Connection names are unique per provider, so a
+	// Google connection called 'default' was making the Xero slot above it
+	// report Connected — to 'a Xero organisation', the fallback shown when a
+	// row has no tenant name, because Google rows never do.
+	const connectedTo = (name) =>
+		connections.find((c) => c.name === name && c.provider === 'xero');
 
 	async function copyRedirect() {
 		if (!setup?.redirectUri) return;

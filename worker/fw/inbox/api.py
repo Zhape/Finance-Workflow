@@ -164,9 +164,25 @@ def build_router(*, engine, principal_dep: Callable[..., Principal],
         try:
             from ..xero import XeroCredentials
 
-            creds = XeroCredentials(org_id, xero_connections(),
-                                    log=lambda m: None, apps=xero_apps())
-            token, tenant_id = creds.xero(current["xeroConnection"])
+            store = xero_connections()
+            connection = current["xeroConnection"]
+            available = [c["name"] for c in store.list(org_id, provider="xero")]
+            if connection not in available:
+                # The configured name is a default ('default') that an org may
+                # simply never have created — its connections might be called
+                # 'us' and 'au'. Failing every lookup because of a name is a
+                # dead end a person cannot see the way out of, so fall back to
+                # a real one and let the tenant picker decide what is read.
+                if not available:
+                    return None, None, (
+                        "No Xero connection for this organisation. Connect "
+                        "Xero in Settings first."
+                    )
+                connection = available[0]
+
+            creds = XeroCredentials(org_id, store, log=lambda m: None,
+                                    apps=xero_apps())
+            token, tenant_id = creds.xero(connection)
             chosen = current.get("xeroTenantId") or tenant_id
             return XeroClient(token, chosen), chosen, None
         except XeroError as exc:
@@ -252,9 +268,18 @@ def build_router(*, engine, principal_dep: Callable[..., Principal],
             from .. import oauth
             from ..xero import XeroCredentials
 
-            creds = XeroCredentials(principal.org_id, xero_connections(),
+            store = xero_connections()
+            available = [c["name"] for c in
+                         store.list(principal.org_id, provider="xero")]
+            connection = current["xeroConnection"]
+            if connection not in available:
+                if not available:
+                    raise XeroError("No Xero connection for this organisation. "
+                                    "Connect Xero in Settings first.")
+                connection = available[0]
+            creds = XeroCredentials(principal.org_id, store,
                                     log=lambda m: None, apps=xero_apps())
-            token, connection_tenant = creds.xero(current["xeroConnection"])
+            token, connection_tenant = creds.xero(connection)
             found = oauth.tenants(token)
         except Exception as exc:  # noqa: BLE001 — the message is the answer
             # Not an HTTP error: "Xero is not connected yet" is an ordinary

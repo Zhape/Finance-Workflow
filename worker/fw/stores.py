@@ -135,16 +135,25 @@ class ConnectionStore:
                     connected_by=token.get("connected_by"), **values,
                 ))
 
-    def list(self, org_id: str) -> list[dict[str, Any]]:
-        """Connection metadata for the UI. Never returns the secret."""
-        with self._engine.connect() as conn:
-            rows = conn.execute(
-                select(connections.c.name, connections.c.label,
+    def list(self, org_id: str,
+             provider: str | None = None) -> list[dict[str, Any]]:
+        """Connection metadata for the UI. Never returns the secret.
+
+        `provider` is optional because the settings screen wants every
+        connection at once. Callers that mean "this org's Xero connections"
+        must pass it: connection names are only unique per provider, so a
+        Google connection called 'default' and a Xero one called 'default' are
+        different rows that an unfiltered list makes indistinguishable.
+        """
+        stmt = (select(connections.c.name, connections.c.label,
                        connections.c.provider, connections.c.tenant_name,
                        connections.c.connected_by, connections.c.updated_at)
                 .where(connections.c.org_id == org_id)
-                .order_by(connections.c.name)
-            ).all()
+                .order_by(connections.c.name))
+        if provider:
+            stmt = stmt.where(connections.c.provider == provider)
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).all()
         return [
             {
                 "name": r.name,
