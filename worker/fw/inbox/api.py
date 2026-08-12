@@ -24,7 +24,7 @@ from ..google import GoogleError
 from ..xero import XeroClient, XeroError
 from . import gemini, render, review, templates as tmpl
 from .gmail import Mailbox
-from .models import KEY, OUT_OF_SCOPE, State, SYSTEM_KEYS
+from .models import KEY, OUT_OF_SCOPE, State
 from .pipeline import Pipeline, SyncReport
 from .stores import (
     CategoryStore,
