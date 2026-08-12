@@ -42,6 +42,24 @@ DEFAULT_SCOPES = (
     "openid email https://www.googleapis.com/auth/gmail.compose"
 )
 
+# The Invoice Inbox additionally has to *read* the mailbox. It still does not
+# get gmail.send: replies are created as drafts in the customer's thread and a
+# person presses send, so the "cannot send" ceiling stays enforced by Google
+# rather than by our own code.
+#
+# gmail.readonly is a Google *restricted* scope. Production use needs OAuth
+# verification plus a third-party CASA security assessment — weeks of elapsed
+# time. Development runs fine in test mode; general availability does not.
+INBOX_SCOPES = (
+    "openid email "
+    "https://www.googleapis.com/auth/gmail.readonly "
+    "https://www.googleapis.com/auth/gmail.compose"
+)
+
+# Connection names for inbox mailboxes are prefixed, so an org can connect
+# several and none of them collides with the chase-up's draft-only "default".
+INBOX_PREFIX = "inbox:"
+
 PROVIDER = "google"
 
 
@@ -98,7 +116,8 @@ def setup_status(org_id: str | None = None, apps=None) -> dict:
     }
 
 
-def start(state_store, org_id: str, name: str, user: str, apps=None) -> str:
+def start(state_store, org_id: str, name: str, user: str, apps=None,
+          scopes: str | None = None) -> str:
     client_id, _secret, redirect = _client(org_id, apps)
 
     from .env import redirect_warning
@@ -117,7 +136,7 @@ def start(state_store, org_id: str, name: str, user: str, apps=None) -> str:
         "response_type": "code",
         "client_id": client_id,
         "redirect_uri": redirect,
-        "scope": os.environ.get("FW_GOOGLE_SCOPES", DEFAULT_SCOPES),
+        "scope": scopes or os.environ.get("FW_GOOGLE_SCOPES", DEFAULT_SCOPES),
         "state": state,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
@@ -161,6 +180,51 @@ def mailbox(access_token: str) -> str:
     return resp.json().get("emailAddress", "")
 
 
+def access_token(org_id: str, store, apps=None, connection: str = "default",
+                 log=print) -> tuple[str, str | None]:
+    """A usable access token for a connection, plus which mailbox it is.
+
+    Shared by the chase-up's drafter and the Invoice Inbox, so there is one
+    refresh path rather than two that can drift. Refreshing two minutes early
+    avoids a token expiring mid-request.
+    """
+    token = store.load(org_id, connection)
+    if not token or not token.get("refresh_token"):
+        raise GoogleError(
+            "Gmail is not connected for this organisation. Connect it in "
+            "Settings."
+        )
+    obtained = token.get("obtained_at", 0)
+    expires_in = token.get("expires_in", 3600)
+    if time.time() > obtained + expires_in - 120:
+        token = _refresh(org_id, store, apps, connection, token, log)
+    return token["access_token"], token.get("mailbox")
+
+
+def _refresh(org_id: str, store, apps, connection: str, token: dict,
+             log=print) -> dict:
+    client_id, client_secret, _redirect = _client(org_id, apps)
+    log("[gmail] refreshing token")
+    resp = requests.post(TOKEN_URL, data={
+        "grant_type": "refresh_token",
+        "refresh_token": token["refresh_token"],
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }, timeout=30)
+    if resp.status_code != 200:
+        raise GoogleError(
+            f"Gmail token refresh failed ({resp.status_code}). Reconnect "
+            f"Gmail in Settings."
+        )
+    new = resp.json()
+    new["obtained_at"] = time.time()
+    # Google does not return the refresh token again on refresh.
+    new.setdefault("refresh_token", token["refresh_token"])
+    new["mailbox"] = token.get("mailbox")
+    store.save(org_id, connection, new)
+    return new
+
+
 class GmailDrafter:
     """Creates drafts in a connected mailbox. Has no way to send one."""
 
@@ -178,40 +242,11 @@ class GmailDrafter:
         return self._address
 
     def _access_token(self) -> str:
-        token = self._store.load(self._org_id, self._connection)
-        if not token or not token.get("refresh_token"):
-            raise GoogleError(
-                "Gmail is not connected for this organisation. Connect it in "
-                "Settings."
-            )
-        self._address = token.get("mailbox")
-        obtained = token.get("obtained_at", 0)
-        expires_in = token.get("expires_in", 3600)
-        if time.time() > obtained + expires_in - 120:
-            token = self._refresh(token)
-        return token["access_token"]
-
-    def _refresh(self, token: dict) -> dict:
-        client_id, client_secret, _redirect = _client(self._org_id, self._apps)
-        self._log("[gmail] refreshing token")
-        resp = requests.post(TOKEN_URL, data={
-            "grant_type": "refresh_token",
-            "refresh_token": token["refresh_token"],
-            "client_id": client_id,
-            "client_secret": client_secret,
-        }, timeout=30)
-        if resp.status_code != 200:
-            raise GoogleError(
-                f"Gmail token refresh failed ({resp.status_code}). Reconnect "
-                f"Gmail in Settings."
-            )
-        new = resp.json()
-        new["obtained_at"] = time.time()
-        # Google does not return the refresh token again on refresh.
-        new.setdefault("refresh_token", token["refresh_token"])
-        new["mailbox"] = token.get("mailbox")
-        self._store.save(self._org_id, self._connection, new)
-        return new
+        token, address = access_token(
+            self._org_id, self._store, self._apps, self._connection, self._log
+        )
+        self._address = address
+        return token
 
     def create_draft(self, to: str, subject: str, body: str) -> str:
         """Create one draft. Returns its id. Never sends."""

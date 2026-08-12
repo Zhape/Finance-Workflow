@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel
 
-from . import env, google, oauth, requests_pr, workflows
+from . import env, google, oauth, requests_pr, tools, workflows
 
 env.load()  # before anything reads os.environ
 
@@ -136,6 +136,24 @@ def _connections() -> ConnectionStore:
     return ConnectionStore(ENGINE, Cipher())
 
 
+def _inbox_mailboxes():
+    from .inbox.stores import MailboxStore
+
+    return MailboxStore(ENGINE)
+
+
+def _inbox_categories():
+    from .inbox.stores import CategoryStore
+
+    return CategoryStore(ENGINE)
+
+
+def _inbox_settings():
+    from .inbox.stores import SettingsStore
+
+    return SettingsStore(ENGINE)
+
+
 def me(
     authorization: str | None = Header(default=None),
     x_org_id: str | None = Header(default=None),
@@ -218,7 +236,14 @@ def list_workflows(principal: Principal = Depends(me)):
         # module, not something the UI should hardcode by key.
         item["hasTemplates"] = bool(_defaults_for(workflows.get(spec.key)))
         out.append(item)
-    return {"workflows": out}
+    # Tools are the same grant, a different shape: their own screen rather than
+    # a launch form. Filtered by the same rule, so an org still never sees a
+    # tile it cannot use.
+    return {
+        "workflows": out,
+        "tools": [spec.to_json() for spec in tools.specs()
+                  if spec.key in allowed],
+    }
 
 
 class WorkflowGrant(BaseModel):
@@ -228,10 +253,11 @@ class WorkflowGrant(BaseModel):
 @app.put("/api/workflows/access")
 def grant_workflow(body: WorkflowGrant, principal: Principal = Depends(me)):
     principal.require("admin")
-    try:
-        workflows.get(body.workflow)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from None
+    if not tools.has(body.workflow):
+        try:
+            workflows.get(body.workflow)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from None
     ACCESS.grant(principal.org_id, body.workflow, principal.email)
     return {"ok": True, "workflows": sorted(ACCESS.keys(principal.org_id))}
 
@@ -378,6 +404,10 @@ def google_callback(code: str | None = None, state: str | None = None,
     if pending is None:
         return RedirectResponse(f"{WEB_ORIGIN}/settings?error=expired_state")
 
+    # One registered redirect URI serves both Google flows; which one this is
+    # comes from the state we minted, never from the query string.
+    is_inbox = pending["name"] == "inbox"
+
     try:
         token = google.exchange(code, pending["verifier"], pending["org_id"],
                                 _google_apps())
@@ -385,12 +415,28 @@ def google_callback(code: str | None = None, state: str | None = None,
             # Without one, every run after the first hour would fail. Better to
             # refuse now than to store a connection that quietly expires.
             return RedirectResponse(f"{WEB_ORIGIN}/settings?error=no_refresh_token")
-        token["mailbox"] = google.mailbox(token["access_token"])
+        address = google.mailbox(token["access_token"])
+        token["mailbox"] = address
         token["connected_by"] = pending["created_by"]
-        _google_connections().save(pending["org_id"], "default", token)
+
+        if is_inbox:
+            # Named after the mailbox, so an org can connect several and none
+            # of them collides with the chase-up's draft-only "default".
+            connection = google.INBOX_PREFIX + address.lower()
+            _google_connections().save(pending["org_id"], connection, token)
+            _inbox_mailboxes().upsert(pending["org_id"], address.lower(),
+                                      connection, pending["created_by"])
+            # A fresh org gets the shipped buckets and a settings row here, so
+            # the inbox works with zero configuration after connecting.
+            _inbox_categories().seed(pending["org_id"], pending["created_by"])
+            _inbox_settings().get(pending["org_id"])
+        else:
+            _google_connections().save(pending["org_id"], "default", token)
     except (google.GoogleError, EncryptionError):
         return RedirectResponse(f"{WEB_ORIGIN}/settings?error=exchange_failed")
 
+    if is_inbox:
+        return RedirectResponse(f"{WEB_ORIGIN}/inbox?connected={address}")
     return RedirectResponse(f"{WEB_ORIGIN}/settings?connected=gmail")
 
 
@@ -648,6 +694,30 @@ def approve(run_id: str, body: Approve, principal: Principal = Depends(me)):
     RUNS.complete(principal.org_id, run_id, result,
                   [r["id"] for r in chosen], principal.email)
     return _run_json(RUNS.get(principal.org_id, run_id), principal.org_id)
+
+
+# ---------------------------------------------------------------------------
+# Invoice Inbox
+# ---------------------------------------------------------------------------
+# Mounted as a router rather than three hundred more lines here. It is given
+# the singletons this module owns — the engine, the token stores, the thread
+# pool — so there is one of each rather than a second set with its own
+# connection pool.
+
+from .inbox import api as inbox_api  # noqa: E402
+
+inbox_api.set_state_store(STATES)
+app.include_router(inbox_api.build_router(
+    engine=ENGINE,
+    principal_dep=me,
+    google_connections=_google_connections,
+    google_apps=_google_apps,
+    xero_connections=_connections,
+    xero_apps=_apps,
+    templates_store=TEMPLATES,
+    access_store=ACCESS,
+    pool=POOL,
+))
 
 
 @app.get("/api/runs/{run_id}/artifact")

@@ -7,12 +7,14 @@ export async function load({ fetch }) {
 	// configured". The layout explains both; throwing would replace that
 	// explanation with an error page.
 	try {
-		const [{ workflows }, { runs }] = await Promise.all([
+		const [{ workflows, tools }, { runs }] = await Promise.all([
 			api.workflows(fetch),
 			api.runs(fetch)
 		]);
-		return { workflows, runs };
+		// `tools` are granted the same way but have their own screen rather
+		// than a launch form. Defaulted so a stale worker still renders.
+		return { workflows, tools: tools ?? [], runs };
 	} catch {
-		return { workflows: [], runs: [] };
+		return { workflows: [], tools: [], runs: [] };
 	}
 }
