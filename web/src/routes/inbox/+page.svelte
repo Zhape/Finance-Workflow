@@ -356,18 +356,29 @@
 			<div class="fields">
 				<label for="xero-org">
 					Xero organisation
-					<select id="xero-org" bind:value={draftXeroTenant} disabled={busy}>
-						{#if !xeroOrgs.length}
-							<option value="">{xeroOrgError || 'Loading…'}</option>
-						{/if}
-						{#each xeroOrgs as organisation (organisation.tenantId)}
-							<option value={organisation.tenantId}>{organisation.name}</option>
-						{/each}
-					</select>
-					<span class="hint">
-						Every organisation this Xero connection can reach. Invoice lookups run
-						against the one selected here.
-					</span>
+					<!-- A dropdown whose only entry is an error message reads as a
+					     broken control. When Xero cannot be asked, say what to do
+					     about it instead and point at the screen that does it. -->
+					{#if xeroOrgError}
+						<span class="problem">
+							{xeroOrgError}
+							<a href="/settings">Open Settings →</a>
+						</span>
+					{:else}
+						<select id="xero-org" bind:value={draftXeroTenant} disabled={busy}>
+							{#if !xeroOrgs.length}
+								<option value="">Loading…</option>
+							{/if}
+							{#each xeroOrgs as organisation (organisation.tenantId)}
+								<option value={organisation.tenantId}>{organisation.name}</option>
+							{/each}
+						</select>
+						<span class="hint">
+							Every organisation this Xero connection can reach. Invoice lookups run
+							against the one selected here. If one is missing, reconnect Xero and
+							grant it on the consent screen.
+						</span>
+					{/if}
 				</label>
 
 				<label for="model">
@@ -381,8 +392,10 @@
 					<span class="hint">
 						{#if modelError}
 							{modelError}
-						{:else}
+						{:else if models.length}
 							Only models this API key can actually use are listed.
+						{:else}
+							Leave on the default and the worker picks a model your key can reach.
 						{/if}
 					</span>
 				</label>
@@ -839,6 +852,15 @@
 		font-size: 0.76rem;
 		color: var(--muted);
 		line-height: 1.4;
+	}
+	.settings .problem {
+		font-weight: 400;
+		font-size: 0.8rem;
+		line-height: 1.45;
+		color: var(--danger);
+		background: #fdecea;
+		border-radius: 6px;
+		padding: 8px 10px;
 	}
 	.reason {
 		font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
