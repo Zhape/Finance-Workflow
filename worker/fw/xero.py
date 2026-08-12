@@ -238,10 +238,83 @@ class XeroClient:
                     out[cid] = contact
         return out
 
-    def _get(self, resource: str, params: dict | None = None) -> dict[str, Any]:
+    # -----------------------------------------------------------------------
+    # Single-invoice lookups, for answering a customer's email
+    # -----------------------------------------------------------------------
+    # These carry a short timeout. A pay run can afford to wait a minute for a
+    # few hundred bills; someone watching an inbox sync cannot, and the product
+    # promises a person sees the email within ten seconds either way.
+
+    LOOKUP_TIMEOUT = 10
+
+    def get_invoices_by_number(self, number: str) -> list[dict[str, Any]]:
+        """Every invoice answering to this number.
+
+        Returns the list rather than the first hit on purpose: two matches is a
+        meaningful answer (a repeating invoice, or a reused number), and the
+        caller must treat it as "unknown" rather than picking one.
+        """
+        if not (number or "").strip():
+            return []
+        found = self._get(
+            "Invoices",
+            {"InvoiceNumbers": number.strip(), "summaryOnly": "false"},
+            timeout=self.LOOKUP_TIMEOUT,
+        )
+        return found.get("Invoices", []) or []
+
+    def find_contacts_by_email(self, email: str) -> list[dict[str, Any]]:
+        found = self._get(
+            "Contacts",
+            {"where": f'EmailAddress=="{email.strip()}"'},
+            timeout=self.LOOKUP_TIMEOUT,
+        )
+        return found.get("Contacts", []) or []
+
+    def find_contacts_by_domain(self, domain: str) -> list[dict[str, Any]]:
+        """Contacts whose email is at this domain.
+
+        Xero has no domain operator, so this filters a name-ordered page of
+        contacts client-side. Good enough for the secondary lookup, which only
+        has to offer a manager something to pick from.
+        """
+        clean = (domain or "").strip().lower()
+        if not clean:
+            return []
+        found = self._get("Contacts", {"page": 1},
+                          timeout=self.LOOKUP_TIMEOUT).get("Contacts", []) or []
+        return [
+            c for c in found
+            if str(c.get("EmailAddress") or "").lower().endswith("@" + clean)
+        ]
+
+    def get_open_invoices_for_contact(self, contact_id: str) -> list[dict[str, Any]]:
+        found = self._get(
+            "Invoices",
+            {"ContactIDs": contact_id, "Statuses": "AUTHORISED",
+             "summaryOnly": "false"},
+            timeout=self.LOOKUP_TIMEOUT,
+        )
+        return found.get("Invoices", []) or []
+
+    def _get(self, resource: str, params: dict | None = None,
+             timeout: int = 60) -> dict[str, Any]:
         url = f"{API_BASE}/{resource}"
         for attempt in range(1, _MAX_RETRIES + 1):
-            resp = requests.get(url, headers=self._headers, params=params, timeout=60)
+            try:
+                resp = requests.get(url, headers=self._headers, params=params,
+                                    timeout=timeout)
+            except requests.Timeout as exc:
+                # Named explicitly so the caller can record `timed_out` rather
+                # than a generic failure — they are different facts to a person
+                # deciding whether to retry or to answer manually.
+                raise XeroError(
+                    f"Xero timed out after {timeout}s on {resource}."
+                ) from exc
+            except requests.RequestException as exc:
+                raise XeroError(
+                    f"Could not reach Xero ({type(exc).__name__}) on {resource}."
+                ) from exc
             if resp.ok:
                 return resp.json()
 

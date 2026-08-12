@@ -75,3 +75,25 @@ services:
         value: https://finance-workflows.vercel.app
       - key: SUPABASE_URL
         sync: false                # enables real JWT verification
+
+      # --- Invoice Inbox -------------------------------------------------
+      # Gmail. Mailboxes are connected with read + compose scopes and never
+      # gmail.send, so the service cannot send an email even if the code
+      # tried to. gmail.readonly is a Google *restricted* scope: production
+      # use needs OAuth verification plus a third-party CASA assessment, so
+      # test mode (up to 100 test users) is the ceiling until that clears.
+      - key: FW_GOOGLE_CLIENT_ID
+        sync: false
+      - key: FW_GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: FW_GOOGLE_REDIRECT_URI
+        sync: false                # https://<this-service>.onrender.com/api/connections/google/callback
+
+      # Classification. Without this key the inbox still ingests and still
+      # drafts from approved templates — every email simply arrives
+      # unclassified for a person to categorise, which is the same degraded
+      # mode a model outage produces. No part of correctness depends on it.
+      - key: FW_GEMINI_API_KEY
+        sync: false
+      - key: FW_GEMINI_MODEL
+        value: gemini-2.5-flash

@@ -28,6 +28,7 @@ from . import env
 from .banking import ExcelBankDetails, payment_columns
 from .crypto import Cipher
 from .db import create_db_engine, init_db, is_sqlite, org_members, orgs
+from .inbox.stores import CategoryStore, SettingsStore
 from .stores import (
     ConnectionStore,
     LayoutStore,
@@ -101,8 +102,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # Workflow access fails closed, so a seeded org must be granted explicitly.
     # The pay run is what this script sets up data for.
-    WorkflowAccessStore(engine).grant(org_id, "weekly-payrun", args.email)
+    access = WorkflowAccessStore(engine)
+    access.grant(org_id, "weekly-payrun", args.email)
     print("  + workflow access: weekly-payrun")
+
+    # The Invoice Inbox is granted the same way, and its classification buckets
+    # are seeded now rather than on first sync — so a fresh org has working
+    # categories and templates with zero configuration, which is the UAT.
+    access.grant(org_id, "invoice-inbox", args.email)
+    CategoryStore(engine).seed(org_id, args.email)
+    SettingsStore(engine).get(org_id)
+    print("  + tool access: invoice-inbox (7 categories, templates, "
+          "no auto-send to disable — nothing here sends)")
 
     cfg = _desktop_config()
     layouts = LayoutStore(engine)

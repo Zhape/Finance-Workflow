@@ -2,7 +2,9 @@
 
 A hosted version of the local finance desktop apps, for other finance teams.
 One workflow implemented end-to-end — **Weekly Pay Run**, staging only, no
-Wise write path — on a multi-tenant foundation.
+Wise write path — on a multi-tenant foundation, plus the **Invoice Inbox**,
+which reads customer invoice email, checks it against Xero and prepares a
+reply from approved wording.
 
 ## What it proves
 
@@ -32,10 +34,83 @@ worker/            Python — runs the workflows. Needs a persistent host
   fw/banking.py      BankDetailsSource: Excel (onboarding) | Vendor table
   fw/xero.py         token refresh + read-only Accounting API client
   fw/workflows/      one module per workflow, registered in __init__.py
+  fw/tools.py        capabilities that are not batch workflows
+  fw/inbox/          the Invoice Inbox (see below)
   fw/seed.py         create an org and import an existing desktop setup
   fw/server.py       the API
 web/               SvelteKit — sign-in, tiles, generated forms, review, settings
 ```
+
+## The Invoice Inbox
+
+Customer mail about invoices arrives, gets classified, gets checked against the
+ledger, and comes back as a draft reply built from wording the business
+approved in advance. The finance manager reads the draft and presses send.
+
+```
+fw/inbox/models.py     states, the seven shipped categories, error codes
+fw/inbox/templates.py  the approved wording and the slots it may reference
+fw/inbox/render.py     fills a template — pure function, cannot reach a model
+fw/inbox/classify.py   the ClassificationClient port and the rules on its output
+fw/inbox/gemini.py     the one implementation: structured output + circuit breaker
+fw/inbox/verify.py     Xero lookup; ambiguous is treated as not found
+fw/inbox/gmail.py      reads a mailbox, drafts a reply into the customer's thread
+fw/inbox/review.py     blockers (stop a draft) and flags (tell a person why)
+fw/inbox/pipeline.py   ingest -> classify -> verify -> render, per email
+fw/inbox/api.py        the /api/inbox router
+```
+
+**Nothing here sends.** The reply is created with `drafts.create` carrying the
+customer's `threadId` and `In-Reply-To`, so it appears in Gmail as a normal
+reply in the right conversation — and a person presses send. The scope
+requested is `gmail.compose`, which cannot send, so this is a ceiling Google
+enforces rather than a promise the code makes. There is no auto-send mode and
+no `auto_send_enabled` column to turn one on; adding a send path means adding a
+column, which is the kind of change that should be hard to make by accident.
+
+**Sync is a button.** No `users.watch`, no Pub/Sub topic, no daily watch
+renewal and no always-on host: someone presses Sync and waits a few seconds.
+That trades away "ingested within a minute of the Gmail timestamp" for running
+on an instance that is allowed to sleep, and removes three moving parts that
+would each have to work perfectly before a single email arrived. A sync is
+bounded so it cannot outlive a request, and says when more is still waiting.
+
+Three properties are worth more than the feature list, and each is a test
+rather than a paragraph:
+
+- **No invented words.** `render.py` imports nothing that can reach a model.
+  `test_inbox_render.py` strips the injected values back out of every rendered
+  template and asserts what remains is the stored template, byte for byte.
+- **Exactly one reply per email.** `unique (email_id)` on `inbox_replies`, and
+  the row is reserved *before* Gmail is called. Two tabs, a double click and a
+  replayed request all resolve to one draft; the loser is told "already
+  drafted" rather than shown an error.
+- **An uncertain match is not a match.** Two invoices answering to one number
+  is treated exactly as none: the placeholders stay unfilled and the front end
+  and the API both refuse to draft. Deleting the placeholder text is the
+  documented way to send without it.
+
+Categories are rows, not code. The classifier's response schema is rebuilt from
+an org's enabled categories on every call, so adding a bucket is inserting a
+row and writing its wording — no deploy. The description on the row is what
+teaches the classifier to recognise it.
+
+Without `FW_GEMINI_API_KEY` the inbox still ingests, still checks Xero and
+still drafts from approved templates; every email simply arrives unclassified
+for a person to categorise. That is the same degraded mode a model outage
+produces, and it is deliberate: an outage costs triage speed, never
+correctness.
+
+⚠️ `gmail.readonly` is a Google **restricted** scope. Production use needs
+OAuth verification plus a third-party CASA assessment — typically 4–8 weeks and
+a few thousand dollars. Development runs fine in test mode (up to 100 test
+users); general availability does not. Start the submission early or it becomes
+the launch date.
+
+A shared alias such as `accounts@` is not a real account and cannot complete
+OAuth. Forward it into a mailbox that can, or add that mailbox to the Google
+Group — several mailboxes per org is the normal case, and the screen shows the
+union of all of them.
 
 ## Tenancy model
 
@@ -126,6 +201,7 @@ database, so a green health check proves the worker reached Supabase.
 | `PUBLIC_SUPABASE_URL` / `PUBLIC_SUPABASE_ANON_KEY` | Web app sign-in. Unset = dev mode. |
 | `FW_GOOGLE_CLIENT_ID` / `_SECRET` | The platform's Google app (Gmail drafting). Orgs may override in Settings. |
 | `FW_GOOGLE_REDIRECT_URI` | Must be registered on the Google client. |
+| `FW_GEMINI_API_KEY` / `FW_GEMINI_MODEL` | Invoice Inbox classification. Absent = everything arrives unclassified, which is a supported mode. |
 | `FW_GITHUB_TOKEN` / `FW_GITHUB_REPO` | Lets "Request a workflow" open pull requests on this repo. |
 | `FW_ANTHROPIC_API_KEY` / `FW_ANTHROPIC_MODEL` | Optional: attaches a generated draft module to request PRs. |
 
@@ -147,6 +223,17 @@ the token is per-org.
 - **Invites and org creation in the UI.** `fw.seed` does it from the CLI.
 - **The Playwright enrichment step** from the chase-up app. It needs an
   interactive login and will not run headless.
+- **Sending, anywhere in the product.** The pay run writes a CSV a human
+  uploads; the chase-up and the Invoice Inbox write Gmail drafts a human sends.
+  Nothing in this repository can put a message in front of a customer or move
+  money on its own.
+- **Push ingestion for the Invoice Inbox.** No Gmail watch, no Pub/Sub, no
+  renewal job — Sync is a button, so nothing has to stay awake. The cost is
+  that mail appears when someone asks for it rather than within a minute.
+- **Attachment parsing.** Remittance PDFs are noted as present and stored by
+  Gmail; nothing reads them.
+- **Non-English mail.** Detected and routed to manual with a reason, rather
+  than classified badly in a language the templates cannot answer in.
 
 ## Verified against real data
 

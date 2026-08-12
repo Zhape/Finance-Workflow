@@ -107,6 +107,36 @@ export const api = {
 			'DELETE'
 		),
 
+	// Invoice Inbox. Ingestion is a button, so `syncInbox` is the only thing
+	// that pulls mail — there is no background job filling this screen behind
+	// your back, and nothing here sends: `draftReply` puts a draft in Gmail.
+	inboxStatus: (fetcher = fetch) => get('/api/inbox/status', fetcher),
+	inboxEmails: (fetcher = fetch) => get('/api/inbox/emails', fetcher),
+	inboxEmail: (id, fetcher = fetch) =>
+		get(`/api/inbox/emails/${encodeURIComponent(id)}`, fetcher),
+	syncInbox: () => send('/api/inbox/sync', 'POST'),
+	connectMailbox: () => send('/api/inbox/mailboxes/start', 'POST'),
+	removeMailbox: (id) => send(`/api/inbox/mailboxes/${encodeURIComponent(id)}`, 'DELETE'),
+	setInboxCategory: (id, categoryKey) =>
+		send(`/api/inbox/emails/${encodeURIComponent(id)}/category`, 'PUT', { categoryKey }),
+	saveInboxDraft: (id, subject, body) =>
+		send(`/api/inbox/emails/${encodeURIComponent(id)}/draft`, 'PUT', { subject, body }),
+	draftReply: (id) => send(`/api/inbox/emails/${encodeURIComponent(id)}/draft-reply`, 'POST'),
+	dismissInboxEmail: (id) =>
+		send(`/api/inbox/emails/${encodeURIComponent(id)}/dismiss`, 'POST'),
+	saveInboxSettings: (lookbackDays, xeroConnection) =>
+		send('/api/inbox/settings', 'PUT', { lookbackDays, xeroConnection }),
+	inboxTemplates: (fetcher = fetch) => get('/api/inbox/templates', fetcher),
+	saveInboxTemplate: (variant, subject, body) =>
+		send('/api/inbox/templates', 'PUT', { variant, subject, body }),
+	resetInboxTemplate: (variant) =>
+		send(`/api/inbox/templates/${encodeURIComponent(variant)}`, 'DELETE'),
+	addInboxCategory: (key, label, description) =>
+		send('/api/inbox/categories', 'POST', { key, label, description }),
+	editInboxCategory: (key, changes) =>
+		send(`/api/inbox/categories/${encodeURIComponent(key)}`, 'PUT', changes),
+	dismissInboxErrors: () => send('/api/inbox/errors/dismiss', 'POST'),
+
 	workflowRequests: (fetcher = fetch) => get('/api/workflow-requests', fetcher),
 	requestWorkflow: (title, description) =>
 		send('/api/workflow-requests', 'POST', { title, description }),
@@ -145,6 +175,22 @@ export function when(iso) {
 		hour: '2-digit',
 		minute: '2-digit'
 	});
+}
+
+/** How long something has been waiting, in the units a person would say it in.
+ *  The left-hand queue is sorted by this, so it has to read at a glance. */
+export function age(iso) {
+	if (!iso) return '—';
+	const hasZone = /[Z+]|-\d{2}:\d{2}$/.test(iso.slice(10));
+	const then = new Date(hasZone ? iso : iso + 'Z');
+	if (Number.isNaN(then.getTime())) return '—';
+
+	const minutes = Math.max(0, Math.round((Date.now() - then.getTime()) / 60000));
+	if (minutes < 1) return 'just now';
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.round(minutes / 60);
+	if (hours < 48) return `${hours}h`;
+	return `${Math.round(hours / 24)}d`;
 }
 
 export function money(value) {

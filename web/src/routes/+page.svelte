@@ -32,6 +32,19 @@
 			</span>
 		</a>
 	{/each}
+	{#each data.tools ?? [] as tool (tool.key)}
+		<a class="tile" href={tool.href}>
+			<span class="icon" aria-hidden="true">@</span>
+			<span class="name">{tool.name}</span>
+			<span class="desc">{tool.description}</span>
+			<span class="tags">
+				{#each tool.integrations as integration}
+					<span class="tag">{integration}</span>
+				{/each}
+				<span class="tag approval">you send it</span>
+			</span>
+		</a>
+	{/each}
 	<a class="tile request" href="/requests">
 		<span class="icon" aria-hidden="true">+</span>
 		<span class="name">Request a workflow</span>
