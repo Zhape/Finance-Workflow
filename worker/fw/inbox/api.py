@@ -210,6 +210,29 @@ def build_router(*, engine, principal_dep: Callable[..., Principal],
         )
         return pipeline, xero_error
 
+    def unclassified_ids(org_id: str) -> list[str]:
+        """Emails whose label came from the fallback path, not the classifier.
+
+        `source='fallback'` means the classifier never actually answered — it
+        was unconfigured, timed out, rate limited, or the circuit was open. The
+        email still reached a person with a holding template, which is the
+        degraded mode working, but the label is not a judgement and should not
+        be treated as one.
+
+        Deliberately narrow: a real classification, a human override, and
+        anything already drafted into Gmail are all left alone.
+        """
+        rows = emails.list(org_id, [State.NEEDS_REVIEW, State.DRAFT_FAILED],
+                           limit=1000)
+        ids = [r["id"] for r in rows]
+        labels = classifications.latest_map(org_id, ids)
+        sent = replies.status_map(org_id, ids)
+        return [
+            email_id for email_id in ids
+            if (labels.get(email_id) or {}).get("source") == "fallback"
+            and sent.get(email_id) != "created"
+        ]
+
     # -- status and settings ---------------------------------------------
 
     @router.get("/status")
@@ -226,6 +249,9 @@ def build_router(*, engine, principal_dep: Callable[..., Principal],
                 settings.get(principal.org_id).get("classifierModel")),
             "errors": errors.open(principal.org_id),
             "stats": emails.stats(principal.org_id),
+            # Drives the re-classify action: how many labels are placeholders
+            # left by an outage rather than answers from the classifier.
+            "unclassified": len(unclassified_ids(principal.org_id)),
             # Shown permanently, so a wrong organisation is obvious rather than
             # something you discover from a reply quoting the wrong invoice.
             "xero": {
@@ -324,6 +350,30 @@ def build_router(*, engine, principal_dep: Callable[..., Principal],
         gemini.CIRCUIT.record_success()
         return {"ok": True, "classifier": gemini.status(
             settings.get(principal.org_id).get("classifierModel"))}
+
+    @router.post("/reclassify")
+    def reclassify(principal: Principal = Depends(principal_dep)):
+        """Queue everything an outage failed to classify for another attempt.
+
+        Without this a classifier outage is permanent. A triaged email never
+        returns to the pending set, so pressing Sync again does nothing at all
+        — the mail stays labelled by the fallback for ever, and the only cure
+        was someone editing the database.
+        """
+        guard(principal, "member")
+        pending = unclassified_ids(principal.org_id)
+        if not pending:
+            return {"ok": True, "reset": 0,
+                    "message": "Every email has a real classification."}
+
+        # Give the classifier a fresh chance: a cooling circuit would otherwise
+        # refuse the first calls of the very sync this is preparing for.
+        gemini.CIRCUIT.record_success()
+        reset = emails.reset_for_retriage(principal.org_id, pending)
+        errors.resolve_all(principal.org_id)
+        return {"ok": True, "reset": reset,
+                "message": f"{reset} email(s) queued. Press Sync to classify "
+                           f"them — 25 at a time."}
 
     # -- mailboxes -------------------------------------------------------
 

@@ -45,6 +45,7 @@ class SyncReport:
     failed: int = 0
     more_waiting: bool = False
     untriaged: int = 0
+    rate_limited: str = ""
     mailbox_errors: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
@@ -56,6 +57,7 @@ class SyncReport:
             "failed": self.failed,
             "moreWaiting": self.more_waiting,
             "untriaged": self.untriaged,
+            "rateLimited": self.rate_limited,
             "mailboxErrors": self.mailbox_errors,
         }
 
@@ -75,6 +77,7 @@ class Pipeline:
         self._sender = sender_name
         self._templates = template_source
         self._log = log
+        self._rate_limited = ""
 
     # -- ingest -------------------------------------------------------------
 
@@ -148,6 +151,11 @@ class Pipeline:
         except classifier.ClassificationError as exc:
             self.s["errors"].add(self.org_id, "classify", exc.code, str(exc),
                                  email_id=email["id"])
+            if exc.code == Code.CLS_RATE_LIMITED:
+                # Signalled rather than absorbed. Grinding through the rest of
+                # the batch would spend the whole quota producing unclassified
+                # rows that then need a manual reset to undo.
+                self._rate_limited = str(exc)
             return classifier.fallback(exc.code)
 
         latency = int((time.monotonic() - started) * 1000)
@@ -233,6 +241,14 @@ class Pipeline:
             waiting = waiting[:MAX_TRIAGE_PER_SYNC]
 
         for email in waiting:
+            if self._rate_limited:
+                # Stop before touching this one. An email left in `received`
+                # is retried by the next sync automatically; one triaged into
+                # a fallback classification is not, and would need clearing by
+                # hand. Stopping early is what keeps the backlog self-healing.
+                report.rate_limited = self._rate_limited
+                report.untriaged += 1
+                continue
             try:
                 self.triage(email)
                 report.triaged += 1

@@ -40,6 +40,10 @@
 			'not set'
 	);
 	const inboxErrors = $derived(status?.errors ?? []);
+	// Labels left by an outage rather than answers from the classifier. These
+	// are the ones re-classifying can fix; a real classification, a human
+	// override, and anything already drafted into Gmail are all left alone.
+	const unclassified = $derived(status?.unclassified ?? 0);
 	const degraded = $derived(
 		status?.classifier && (!status.classifier.configured || status.classifier.circuitOpen)
 	);
@@ -104,7 +108,17 @@
 			if (r.suppressed) parts.push(`${r.suppressed} auto-replies ignored`);
 			if (r.failed) parts.push(`${r.failed} failed`);
 			notice = `Synced: ${parts.join(', ')}.`;
-			if (r.moreWaiting) notice += ' There is more waiting — sync again.';
+			if (r.rateLimited) {
+				error =
+					`Classification stopped early — ${r.rateLimited} ` +
+					`The emails it did not reach were left untouched, so the next sync ` +
+					`picks them up automatically.`;
+			}
+			if (r.untriaged) {
+				notice += ` ${r.untriaged} more waiting to be categorised — sync again.`;
+			} else if (r.moreWaiting) {
+				notice += ' There is more waiting — sync again.';
+			}
 			for (const m of r.mailboxErrors) error = `${error} ${m}`.trim();
 			status = { ...status, errors: result.errors };
 			await refreshList();
@@ -163,6 +177,28 @@
 			status = await api.inboxStatus();
 			notice = 'Settings saved. Sync again to apply them.';
 			showSettings = false;
+		} catch (e) {
+			error = e.message;
+		}
+		busy = false;
+	}
+
+	async function reclassify() {
+		if (
+			!confirm(
+				`Queue ${unclassified} email(s) to be classified again? Their placeholder ` +
+					`category and draft are discarded. Anything already drafted into Gmail ` +
+					`is left alone.`
+			)
+		)
+			return;
+		busy = true;
+		error = '';
+		try {
+			const result = await api.reclassifyInbox();
+			notice = result.message;
+			status = await api.inboxStatus();
+			await refreshList();
 		} catch (e) {
 			error = e.message;
 		}
@@ -285,6 +321,11 @@
 		<button class="ghost" onclick={connectMailbox}>
 			{connected ? 'Add a mailbox' : 'Connect a mailbox'}
 		</button>
+		{#if connected && unclassified > 0}
+			<button class="ghost" onclick={reclassify} disabled={busy || syncing}>
+				Re-classify {unclassified}
+			</button>
+		{/if}
 		{#if connected}
 			<button onclick={sync} disabled={syncing}>{syncing ? 'Syncing…' : 'Sync now'}</button>
 		{/if}

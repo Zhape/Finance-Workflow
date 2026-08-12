@@ -136,6 +136,7 @@ export const api = {
 	inboxXeroOrgs: (fetcher = fetch) => get('/api/inbox/xero/organisations', fetcher),
 	inboxModels: (fetcher = fetch) => get('/api/inbox/classifier/models', fetcher),
 	resetInboxClassifier: () => send('/api/inbox/classifier/reset', 'POST'),
+	reclassifyInbox: () => send('/api/inbox/reclassify', 'POST'),
 	inboxTemplates: (fetcher = fetch) => get('/api/inbox/templates', fetcher),
 	saveInboxTemplate: (variant, subject, body) =>
 		send('/api/inbox/templates', 'PUT', { variant, subject, body }),

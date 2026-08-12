@@ -359,6 +359,33 @@ class EmailStore:
             ).first()
         return row is not None
 
+    def reset_for_retriage(self, org_id: str, email_ids: list[str]) -> int:
+        """Put emails back in the queue to be classified again.
+
+        Deletes what the failed attempt produced — the fallback classification,
+        the holding draft rendered from it, and the Xero lookup that ran
+        alongside — then returns the email to `received` so the next sync
+        triages it properly. Without this an outage is permanent: a triaged
+        email never returns to the pending set, so pressing Sync again does
+        nothing and the mislabelled mail stays mislabelled for ever.
+        """
+        if not email_ids:
+            return 0
+        with self._engine.begin() as conn:
+            for table in (inbox_classifications, inbox_drafts, inbox_lookups):
+                conn.execute(
+                    delete(table)
+                    .where(table.c.org_id == org_id)
+                    .where(table.c.email_id.in_(email_ids))
+                )
+            result = conn.execute(
+                update(inbox_emails)
+                .where(inbox_emails.c.org_id == org_id)
+                .where(inbox_emails.c.id.in_(email_ids))
+                .values(state=State.RECEIVED, state_reason=None)
+            )
+        return result.rowcount
+
     def stats(self, org_id: str, days: int = 7) -> dict[str, Any]:
         cutoff = _now() - timedelta(days=days)
         with self._engine.connect() as conn:

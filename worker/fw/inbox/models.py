@@ -70,6 +70,9 @@ class Code:
     # Its own code because it is a configuration mistake with a one-line fix,
     # not an outage: the model name is not one this API key can reach.
     CLS_BAD_MODEL = "CLS-005"
+    # Distinct from unavailable: the model and the key are both fine, there is
+    # simply a quota. It resolves by waiting, not by changing configuration.
+    CLS_RATE_LIMITED = "CLS-006"
     XRO_TIMEOUT = "XRO-001"
     XRO_FAILED = "XRO-002"
     TPL_MISSING = "TPL-001"           # no template for this category

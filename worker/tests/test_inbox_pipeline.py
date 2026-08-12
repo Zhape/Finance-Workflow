@@ -492,3 +492,71 @@ def test_a_two_intent_email_is_flagged_for_a_person(
     flags = review.flags(classification, stores["lookups"].latest(
         org, email["id"]), False, False)
     assert "multi_intent" in [f["code"] for f in flags]
+
+
+# ---------------------------------------------------------------------------
+# Recovering from a classifier outage
+# ---------------------------------------------------------------------------
+
+def test_a_classifier_outage_is_recoverable(engine, org, stores, mailbox):
+    """The bug this closes: an outage was permanent.
+
+    A triaged email never returns to the pending set, so once the fallback had
+    labelled everything, pressing Sync again did nothing at all — the mail
+    stayed mislabelled until someone edited the database by hand.
+    """
+    messages = [dict(gmail_message(f"m{n}"), gmail_thread_id=f"t{n}")
+                for n in range(3)]
+    gmail = FakeGmail(messages)
+
+    # The classifier is down. Everything still reaches a person, labelled by
+    # the fallback rather than by a judgement.
+    broken = build(org, stores, FakeClassifier(
+        error=ClassificationError("no key", "CLS-003")), FakeXero([INVOICE]))
+    run_sync(broken, mailbox, gmail)
+
+    labelled = stores["emails"].list(org)
+    assert all(e["state"] == State.NEEDS_REVIEW for e in labelled)
+    assert all(stores["classifications"].latest(org, e["id"]).source == "fallback"
+               for e in labelled)
+
+    # Syncing again changes nothing, because they are no longer pending.
+    working = build(org, stores, FakeClassifier(GOOD_ANSWER), FakeXero([INVOICE]))
+    assert run_sync(working, mailbox, gmail).triaged == 0
+
+    # Re-queueing them is what makes the outage recoverable.
+    ids = [e["id"] for e in labelled]
+    assert stores["emails"].reset_for_retriage(org, ids) == 3
+    assert len(stores["emails"].pending(org)) == 3
+
+    report = run_sync(working, mailbox, gmail)
+    assert report.triaged == 3
+    for email in stores["emails"].list(org):
+        again = stores["classifications"].latest(org, email["id"])
+        assert again.source == "ai"
+        assert again.category == "InvoiceQuery"
+
+
+def test_a_rate_limit_stops_the_batch_instead_of_spending_it(
+        engine, org, stores, mailbox):
+    """A quota is not an outage. Grinding on would spend the remaining
+    allowance producing rows that then need clearing by hand."""
+    from fw.inbox.models import Code
+
+    messages = [dict(gmail_message(f"m{n}"), gmail_thread_id=f"t{n}")
+                for n in range(5)]
+    limited = build(org, stores, FakeClassifier(
+        error=ClassificationError("quota exceeded", Code.CLS_RATE_LIMITED)),
+        FakeXero([INVOICE]))
+
+    report = run_sync(limited, mailbox, gmail := FakeGmail(messages))
+    assert report.rate_limited
+    assert report.triaged == 1, "the first attempt reveals the limit"
+    assert report.untriaged == 4
+
+    # The untouched four are still pending, so the next sync retries them
+    # without anyone having to reset anything.
+    assert len(stores["emails"].pending(org)) == 4
+
+    working = build(org, stores, FakeClassifier(GOOD_ANSWER), FakeXero([INVOICE]))
+    assert run_sync(working, mailbox, gmail).triaged == 4

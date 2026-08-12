@@ -90,11 +90,27 @@ _discovered: str | None = None
 def _prefer(names: list[str]) -> str | None:
     """The most suitable model for classification from what is available.
 
-    Flash-class first: this is a short, schema-constrained labelling call, so
-    latency and price matter far more than reasoning depth. Newest name wins
-    within a class because the list is sorted and later versions sort later.
+    Two filters, both learned the hard way against a real API key:
+
+      * Structured output is non-negotiable — the response schema is what makes
+        prose unrepresentable. `ListModels` advertises `generateContent` for
+        models that nonetheless refuse a response schema ("JSON mode is not
+        enabled", "this model only supports Interactions API"), and picking one
+        produced a wall of 400s. Only the plain `gemini-*` line is trusted.
+      * Flash-class first: this is a short labelling call where latency and
+        price matter more than reasoning depth.
+
+    Newest wins within a class, because the list is sorted and later versions
+    sort later.
     """
-    usable = [n for n in names if "embedding" not in n and "vision" not in n]
+    usable = [
+        n for n in names
+        if n.startswith("gemini-")
+        and not any(word in n for word in (
+            "embedding", "vision", "tts", "image", "audio", "live",
+            "computer-use", "deep-research", "thinking",
+        ))
+    ]
     flash = [n for n in usable if "flash" in n and "lite" not in n]
     return (flash or usable or [None])[-1]
 
@@ -146,6 +162,17 @@ def _detail(resp) -> str:
     except ValueError:
         pass
     return (resp.text or "")[:400]
+
+
+def _retry_after(resp) -> int | None:
+    """How long Google says to wait, when it says so."""
+    header = resp.headers.get("Retry-After") if hasattr(resp, "headers") else None
+    if header and str(header).isdigit():
+        return int(header)
+    import re
+
+    match = re.search(r"retry in (\d+)", _detail(resp), re.IGNORECASE)
+    return int(match.group(1)) if match else None
 
 
 def available_models(api_key: str | None = None) -> list[str]:
@@ -249,6 +276,18 @@ class GeminiClassifier:
             reason = f"Could not reach Gemini: {type(exc).__name__}."
             CIRCUIT.record_failure(reason)
             raise ClassificationError(reason, Code.CLS_UNAVAILABLE) from exc
+
+        if resp.status_code == 429:
+            # A quota, not a fault. Nothing about the configuration is wrong,
+            # so this must not open the circuit — that would turn a pause of
+            # seconds into five minutes of refusing to try.
+            retry = _retry_after(resp)
+            raise ClassificationError(
+                f"Gemini rate limit reached for '{self._model}'"
+                + (f"; it suggests retrying in {retry}s. " if retry else ". ")
+                + _detail(resp)[:200],
+                Code.CLS_RATE_LIMITED,
+            )
 
         if resp.status_code != 200:
             # A 404 here is not "service missing", it is "that model name is
