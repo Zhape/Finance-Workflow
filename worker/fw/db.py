@@ -137,6 +137,18 @@ bank_layouts = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now()),
 )
 
+# Which workflows an org has. Presence means enabled; absence means the org
+# does not see the tile and cannot start a run. No implicit default -- a new
+# org gets nothing until someone grants it.
+org_workflows = Table(
+    "org_workflows", metadata,
+    Column("org_id", _Id, ForeignKey("orgs.id", ondelete="CASCADE"),
+           primary_key=True),
+    Column("workflow_key", Text, primary_key=True),
+    Column("enabled_by", Text),
+    Column("enabled_at", DateTime(timezone=True), server_default=func.now()),
+)
+
 runs = Table(
     "runs", metadata,
     Column("id", _Id, primary_key=True),

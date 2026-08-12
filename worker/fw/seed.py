@@ -28,7 +28,13 @@ from . import env
 from .banking import ExcelBankDetails, payment_columns
 from .crypto import Cipher
 from .db import create_db_engine, init_db, is_sqlite, org_members, orgs
-from .stores import ConnectionStore, LayoutStore, OrgStore, VendorStore
+from .stores import (
+    ConnectionStore,
+    LayoutStore,
+    OrgStore,
+    VendorStore,
+    WorkflowAccessStore,
+)
 
 DESKTOP_DIR = (
     Path.home() / "workspace" / "local-desktop-apps" / "xero-bill-exporter"
@@ -92,6 +98,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         org_id = OrgStore(engine).create(args.org, args.user_id, args.email)
         print(f"created org '{args.org}' ({org_id}) with {args.email} as admin")
+
+    # Workflow access fails closed, so a seeded org must be granted explicitly.
+    # The pay run is what this script sets up data for.
+    WorkflowAccessStore(engine).grant(org_id, "weekly-payrun", args.email)
+    print("  + workflow access: weekly-payrun")
 
     cfg = _desktop_config()
     layouts = LayoutStore(engine)

@@ -21,6 +21,7 @@ from sqlalchemy import delete, insert, select, update
 from .banking import norm_header, norm_vendor, normalise_account
 from .crypto import Cipher
 from .db import (
+    org_workflows,
     provider_apps,
     bank_layouts,
     connections,
@@ -161,6 +162,48 @@ class ConnectionStore:
                 .where(connections.c.org_id == org_id)
                 .where(connections.c.provider == self._provider)
                 .where(connections.c.name == connection)
+            )
+        return result.rowcount > 0
+
+
+class WorkflowAccessStore:
+    """Which workflows an org has.
+
+    Fails closed: an org with no rows has no workflows. That is why `grant` is
+    called explicitly at org creation rather than defaulting to everything --
+    the expensive mistake here is an org seeing a workflow that reads a system
+    it has no business reading.
+    """
+
+    def __init__(self, engine):
+        self._engine = engine
+
+    def keys(self, org_id: str) -> set[str]:
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(org_workflows.c.workflow_key)
+                .where(org_workflows.c.org_id == org_id)
+            ).scalars().all()
+        return set(rows)
+
+    def has(self, org_id: str, workflow_key: str) -> bool:
+        return workflow_key in self.keys(org_id)
+
+    def grant(self, org_id: str, workflow_key: str, user: str | None = None) -> None:
+        if self.has(org_id, workflow_key):
+            return
+        with self._engine.begin() as conn:
+            conn.execute(insert(org_workflows).values(
+                org_id=org_id, workflow_key=workflow_key,
+                enabled_by=user, enabled_at=_now(),
+            ))
+
+    def revoke(self, org_id: str, workflow_key: str) -> bool:
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                delete(org_workflows)
+                .where(org_workflows.c.org_id == org_id)
+                .where(org_workflows.c.workflow_key == workflow_key)
             )
         return result.rowcount > 0
 

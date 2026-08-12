@@ -37,6 +37,7 @@ from .stores import (
     OrgStore,
     RunStore,
     VendorStore,
+    WorkflowAccessStore,
 )
 from .xero import XeroCredentials, XeroError
 
@@ -59,6 +60,7 @@ RUNS = RunStore(ENGINE)
 ORGS = OrgStore(ENGINE)
 STATES = OAuthStateStore(ENGINE)
 LAYOUTS = LayoutStore(ENGINE)
+ACCESS = WorkflowAccessStore(ENGINE)
 
 
 def _apps() -> ProviderAppStore:
@@ -137,7 +139,39 @@ def whoami(principal: Principal = Depends(me)):
 
 @app.get("/api/workflows")
 def list_workflows(principal: Principal = Depends(me)):
-    return {"workflows": [s.to_json() for s in workflows.specs()]}
+    """Only the workflows this org has.
+
+    Filtered rather than flagged: a workflow an org does not have should not
+    appear at all, because a greyed-out tile still tells them what other
+    customers run.
+    """
+    allowed = ACCESS.keys(principal.org_id)
+    return {
+        "workflows": [s.to_json() for s in workflows.specs() if s.key in allowed]
+    }
+
+
+class WorkflowGrant(BaseModel):
+    workflow: str
+
+
+@app.put("/api/workflows/access")
+def grant_workflow(body: WorkflowGrant, principal: Principal = Depends(me)):
+    principal.require("admin")
+    try:
+        workflows.get(body.workflow)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from None
+    ACCESS.grant(principal.org_id, body.workflow, principal.email)
+    return {"ok": True, "workflows": sorted(ACCESS.keys(principal.org_id))}
+
+
+@app.delete("/api/workflows/access/{workflow}")
+def revoke_workflow(workflow: str, principal: Principal = Depends(me)):
+    principal.require("admin")
+    if not ACCESS.revoke(principal.org_id, workflow):
+        raise HTTPException(404, "This organisation does not have that workflow.")
+    return {"ok": True, "workflows": sorted(ACCESS.keys(principal.org_id))}
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +299,10 @@ def list_runs(principal: Principal = Depends(me)):
 @app.post("/api/runs")
 def start_run(body: StartRun, principal: Principal = Depends(me)):
     principal.require("member")
+    if not ACCESS.has(principal.org_id, body.workflow):
+        # Deliberately the same answer as an unknown key: an org should not be
+        # able to discover which workflows exist by probing.
+        raise HTTPException(404, f"Unknown workflow {body.workflow!r}")
     try:
         module = workflows.get(body.workflow)
     except KeyError as exc:
