@@ -144,6 +144,12 @@ def list_connections(principal: Principal = Depends(me)):
     return {"connections": _connections().list(principal.org_id)}
 
 
+@app.get("/api/connections/xero/setup")
+def xero_setup(principal: Principal = Depends(me)):
+    """Configuration the Settings page needs to walk someone through connecting."""
+    return oauth.setup_status()
+
+
 @app.post("/api/connections/xero/start")
 def start_xero(name: str = "default", principal: Principal = Depends(me)):
     principal.require("admin")

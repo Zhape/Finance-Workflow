@@ -78,6 +78,7 @@ export const api = {
 	runs: (fetcher = fetch) => get('/api/runs', fetcher),
 	run: (id, fetcher = fetch) => get(`/api/runs/${id}`, fetcher),
 	connections: (fetcher = fetch) => get('/api/connections', fetcher),
+	xeroSetup: (fetcher = fetch) => get('/api/connections/xero/setup', fetcher),
 
 	start: (workflow, params) => send('/api/runs', 'POST', { workflow, params }),
 	approve: (id, rowIds) => send(`/api/runs/${id}/approve`, 'POST', { rowIds }),

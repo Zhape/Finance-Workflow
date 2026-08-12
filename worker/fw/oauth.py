@@ -56,6 +56,29 @@ def _client() -> tuple[str, str, str]:
     return client_id, secret, redirect
 
 
+def setup_status() -> dict:
+    """What the UI needs to talk someone through connecting Xero.
+
+    The redirect URI is reported from the worker's own configuration rather
+    than assembled in the browser: it must match what Xero has registered
+    byte for byte, so showing a value derived from anywhere else invites a
+    mismatch that only appears at the end of the consent flow.
+    """
+    client_id = os.environ.get("FW_XERO_CLIENT_ID", "").strip()
+    redirect = os.environ.get(
+        "FW_XERO_REDIRECT_URI", "http://localhost:8000/api/connections/xero/callback"
+    ).strip()
+    return {
+        "provider": "xero",
+        "appConfigured": bool(client_id),
+        "redirectUri": redirect,
+        "scopes": os.environ.get("FW_XERO_SCOPES", DEFAULT_SCOPES).split(),
+        # Never the client secret, and not the client id either: neither is
+        # needed to follow the steps, and both are the platform's, not the org's.
+        "developerPortal": "https://developer.xero.com/app/manage",
+    }
+
+
 def start(state_store, org_id: str, name: str, user: str) -> str:
     """Create a PKCE challenge, stash the verifier, return the consent URL."""
     client_id, _secret, redirect = _client()
