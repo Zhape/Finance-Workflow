@@ -292,6 +292,27 @@ def run(params: dict[str, Any], ctx: RunContext) -> RunResult:
 
     note(f"{len(by_contact)} customer(s) past {min_days} days")
 
+    # The Contact on an invoice is a summary and often has no EmailAddress even
+    # when Xero holds one. Ask the Contacts endpoint for the ones we are
+    # missing rather than reporting a customer as uncontactable.
+    missing = [cid for cid, e in by_contact.items() if not e["email"]]
+    if missing:
+        note(f"Looking up email addresses for {len(missing)} customer(s)…")
+        try:
+            contacts = client.get_contacts(missing)
+        except Exception as exc:  # noqa: BLE001
+            contacts = {}
+            note(f"Contact lookup failed ({type(exc).__name__}); "
+                 f"continuing without those addresses")
+        found = 0
+        for cid in missing:
+            contact = contacts.get(cid) or {}
+            address = str(contact.get("EmailAddress") or "").strip()
+            if address:
+                by_contact[cid]["email"] = address
+                found += 1
+        note(f"Found {found} address(es) on the contact record")
+
     sender = getattr(ctx, "sender_name", None) or "Accounts"
     templates = ctx.templates or default_templates()
     rows: list[dict[str, Any]] = []
@@ -375,73 +396,68 @@ def finalise(
     ctx: RunContext,
     columns: list[str],
 ) -> RunResult:
-    """Create a Gmail draft per approved customer, and the chase list as a CSV.
+    """Create a Gmail draft per approved customer.
+
+    There is no file. A pay run produces one because a bank needs it; a chase
+    produces drafts, and a CSV of email bodies alongside them is a second copy
+    of the same thing that nobody sends from.
 
     Drafting is best-effort per row: one customer whose draft fails must not
-    lose the other twenty. Failures are collected and reported rather than
-    raised, and the CSV is produced either way — a run that half-worked should
-    still hand back something usable.
+    lose the other twenty, so failures are collected and reported rather than
+    raised.
 
     `columns` is ignored: unlike a pay run there is no bank template dictating
     layout. It stays in the signature because the platform calls every workflow
     the same way, and a workflow that quietly took different arguments would be
     a trap for the next one.
     """
-    import csv
-    import io
+    if ctx.mailer is None:
+        return RunResult(
+            status=RunStatus.FAILED,
+            rows=rows,
+            summary="Gmail is not connected, so there is nowhere to draft these.",
+            warnings=["Connect Gmail in Settings, then run this again."],
+        )
 
     drafted = 0
+    skipped = 0
     failures: list[str] = []
-    mailbox = None
-    if ctx.mailer is not None:
-        for r in rows:
-            if not r.get("email"):
-                continue
-            try:
-                ctx.mailer.create_draft(
-                    r["email"],
-                    r.get("subject") or "Overdue invoice",
-                    r.get("message") or "",
-                )
-                drafted += 1
-            except Exception as exc:  # noqa: BLE001
-                failures.append(f"{r.get('name')}: {type(exc).__name__}")
-        mailbox = getattr(ctx.mailer, "address", None)
-
-    buf = io.StringIO(newline="")
-    writer = csv.writer(buf)
-    header = ["customer", "email", "currency", "amount_owed", "invoices",
-              "days_overdue", "age_bucket", "invoice_numbers", "subject",
-              "message"]
-    writer.writerow(header)
     for r in rows:
-        writer.writerow([
-            r.get("name"), r.get("email") or "", r.get("currency"),
-            f"{to_float(r.get('amount')):.2f}", r.get("count"),
-            r.get("oldest_days"), r.get("bucket"),
-            r.get("references") or "", r.get("subject") or "",
-            r.get("message") or "",
-        ])
+        if not r.get("email"):
+            skipped += 1
+            continue
+        try:
+            ctx.mailer.create_draft(
+                r["email"],
+                r.get("subject") or "Overdue invoice",
+                r.get("message") or "",
+            )
+            drafted += 1
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{r.get('name')}: {type(exc).__name__}")
 
+    mailbox = getattr(ctx.mailer, "address", None)
+    where = f" in {mailbox}" if mailbox else ""
     total = sum(to_float(r.get("amount")) for r in rows)
-    stamp = datetime.now().strftime("%Y-%m-%d")
 
-    if ctx.mailer is None:
-        outcome = (f"{len(rows)} chase message(s) prepared, {total:,.2f} "
-                   f"outstanding. Gmail is not connected, so nothing was "
-                   f"drafted.")
-    else:
-        where = f" in {mailbox}" if mailbox else ""
-        outcome = (f"{drafted} draft(s) created{where}, {total:,.2f} "
-                   f"outstanding. Nothing has been sent — review and send from "
-                   f"Gmail.")
+    warnings: list[str] = []
+    if skipped:
+        warnings.append(
+            f"{skipped} customer(s) had no email address, so no draft was "
+            f"created for them."
+        )
+    if failures:
+        warnings.append(
+            f"Could not draft for {len(failures)} customer(s): "
+            + ", ".join(failures[:5])
+        )
 
     return RunResult(
         status=RunStatus.COMPLETE,
         rows=rows,
-        warnings=([f"Could not draft for {len(failures)} customer(s): "
-                   + ", ".join(failures[:5])] if failures else []),
-        summary=outcome,
-        artifact_name=f"chase-list-{stamp}.csv",
-        artifact_bytes=buf.getvalue().encode("utf-8-sig"),
+        warnings=warnings,
+        summary=(
+            f"{drafted} draft(s) created{where}, {total:,.2f} outstanding. "
+            f"Nothing has been sent — review and send from Gmail."
+        ),
     )

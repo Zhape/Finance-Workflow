@@ -215,6 +215,29 @@ class XeroClient:
             page += 1
         return invoices
 
+    def get_contacts(self, contact_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Full contact records, keyed by ContactID.
+
+        The Contact embedded in an invoice is a summary: it reliably carries
+        the name and id, and frequently omits EmailAddress. Treating that
+        omission as "no email address" is wrong -- the address is in Xero, just
+        not in that payload. So anything that needs the email must ask the
+        Contacts endpoint for it.
+
+        Requested in batches because the ids go in the query string, and a few
+        hundred of them would exceed a sane URL length.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        unique = [c for c in dict.fromkeys(contact_ids) if c]
+        for i in range(0, len(unique), 50):
+            batch = unique[i:i + 50]
+            found = self._get("Contacts", {"IDs": ",".join(batch)}).get("Contacts", [])
+            for contact in found:
+                cid = contact.get("ContactID")
+                if cid:
+                    out[cid] = contact
+        return out
+
     def _get(self, resource: str, params: dict | None = None) -> dict[str, Any]:
         url = f"{API_BASE}/{resource}"
         for attempt in range(1, _MAX_RETRIES + 1):

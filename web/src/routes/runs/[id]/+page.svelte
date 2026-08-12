@@ -65,9 +65,11 @@
 		<div>
 			Approved by <strong>{run.approvedBy}</strong> at {when(run.approvedAt)}.
 		</div>
-		<button class="download" onclick={() => api.downloadArtifact(run.id, run.artifactName)}>
-			Download {run.artifactName}
-		</button>
+		{#if run.artifactName}
+			<button class="download" onclick={() => api.downloadArtifact(run.id, run.artifactName)}>
+				Download {run.artifactName}
+			</button>
+		{/if}
 	</div>
 	{#if run.workflow === 'weekly-payrun'}
 		<p class="note">

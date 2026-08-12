@@ -165,24 +165,15 @@ def test_greeting_uses_a_first_name_for_people_and_the_whole_name_for_companies(
 # Output
 # ---------------------------------------------------------------------------
 
-def test_finalise_writes_a_chase_list(monkeypatch):
-    result = run([invoice("Acme Ltd", 100, 45)], monkeypatch)
-    ctx = RunContext(org_id="t", creds=None, log=lambda m: None)
-    final = oc.finalise({}, result.rows, ctx, [])
-
-    text = final.artifact_bytes.decode("utf-8-sig")
-    header, row = text.splitlines()[:2]
-    assert header.startswith("customer,email,currency,amount_owed")
-    assert "Acme Ltd" in row
-    assert final.status is RunStatus.COMPLETE
-
-
-def test_without_gmail_nothing_is_drafted_and_it_says_so(monkeypatch):
+def test_without_gmail_the_run_fails_rather_than_pretending(monkeypatch):
+    """There is no file to fall back on, so a chase-up with no mailbox has
+    nothing it can do. Saying so beats reporting success."""
     result = run([invoice("Acme Ltd", 100, 45)], monkeypatch)
     ctx = RunContext(org_id="t", creds=None, mailer=None, log=lambda m: None)
     final = oc.finalise({}, result.rows, ctx, [])
+    assert final.status is RunStatus.FAILED
     assert "not connected" in final.summary
-    assert final.artifact_bytes  # the file is produced regardless
+    assert final.artifact_bytes is None
 
 
 class FakeMailer:
@@ -216,6 +207,9 @@ def test_with_gmail_one_draft_per_customer(monkeypatch):
     assert "2 draft(s) created" in final.summary
     assert "finance@company.test" in final.summary
     assert "Nothing has been sent" in final.summary
+    # Drafts are the output. A file would be a second copy nobody sends from.
+    assert final.artifact_bytes is None
+    assert final.artifact_name is None
 
 
 def test_customers_without_an_email_are_skipped_not_failed(monkeypatch):
@@ -228,7 +222,7 @@ def test_customers_without_an_email_are_skipped_not_failed(monkeypatch):
     final = oc.finalise({}, result.rows, ctx, [])
 
     assert len(mailer.drafts) == 1
-    assert not final.warnings
+    assert "no email address" in final.warnings[0]
 
 
 def test_one_failed_draft_does_not_lose_the_rest(monkeypatch):
@@ -243,8 +237,7 @@ def test_one_failed_draft_does_not_lose_the_rest(monkeypatch):
 
     assert len(mailer.drafts) == 1
     assert final.status is RunStatus.COMPLETE
-    assert "Bad Ltd" in final.warnings[0]
-    assert final.artifact_bytes
+    assert any("Bad Ltd" in w for w in final.warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -274,3 +267,80 @@ def test_shipped_defaults_cover_every_tone():
     assert set(defaults) == {t for _, _, t in oc.BUCKETS}
     for variant in defaults.values():
         assert variant["subject"] and variant["body"]
+
+
+# ---------------------------------------------------------------------------
+# Contact lookup
+# ---------------------------------------------------------------------------
+
+class FakeXeroWithContacts(FakeXero):
+    """Mimics Xero properly: the Contact on an invoice is a summary with no
+    email, and the address only appears from the Contacts endpoint."""
+
+    def __init__(self, invoices, contacts):
+        super().__init__(invoices)
+        self._contacts = contacts
+        self.asked_for: list[str] = []
+
+    def get_contacts(self, ids):
+        self.asked_for.extend(ids)
+        return {c: self._contacts[c] for c in ids if c in self._contacts}
+
+
+def test_an_email_missing_from_the_invoice_is_fetched_from_the_contact(monkeypatch):
+    """Xero's invoice payload frequently omits EmailAddress even when the
+    contact record has one. Reporting that customer as uncontactable is the
+    bug this pins down."""
+    inv = invoice("KWF", 6000, 909, "INV-1", email="")
+    fake = FakeXeroWithContacts(
+        [inv], {"KWF": {"ContactID": "KWF", "EmailAddress": "hdetering@kwf.nl"}}
+    )
+    monkeypatch.setattr(oc, "XeroClient", fake)
+    ctx = RunContext(org_id="t", creds=FakeCreds(), log=lambda m: None)
+    result = oc.run({"connection": "default", "min_days_overdue": "1"}, ctx)
+
+    assert fake.asked_for == ["KWF"]
+    assert result.rows[0]["email"] == "hdetering@kwf.nl"
+    assert result.rows[0]["contactable"] is True
+    assert not result.warnings
+
+
+def test_only_the_missing_contacts_are_looked_up(monkeypatch):
+    """A lookup per customer would be a needless round trip for every invoice
+    that already carried an address."""
+    fake = FakeXeroWithContacts([
+        invoice("Has Email", 100, 30, "INV-1", email="ap@has.test", contact_id="c1"),
+        invoice("No Email", 200, 30, "INV-2", email="", contact_id="c2"),
+    ], {"c2": {"ContactID": "c2", "EmailAddress": "ap@no.test"}})
+    monkeypatch.setattr(oc, "XeroClient", fake)
+    ctx = RunContext(org_id="t", creds=FakeCreds(), log=lambda m: None)
+    oc.run({"connection": "default", "min_days_overdue": "1"}, ctx)
+
+    assert fake.asked_for == ["c2"]
+
+
+def test_a_contact_with_genuinely_no_email_is_still_flagged(monkeypatch):
+    fake = FakeXeroWithContacts(
+        [invoice("Nobody Ltd", 100, 30, "INV-1", email="")],
+        {"Nobody Ltd": {"ContactID": "Nobody Ltd", "EmailAddress": ""}},
+    )
+    monkeypatch.setattr(oc, "XeroClient", fake)
+    ctx = RunContext(org_id="t", creds=FakeCreds(), log=lambda m: None)
+    result = oc.run({"connection": "default", "min_days_overdue": "1"}, ctx)
+
+    assert result.rows[0]["contactable"] is False
+    assert "Nobody Ltd" in result.warnings[0]
+
+
+def test_a_failed_contact_lookup_does_not_lose_the_run(monkeypatch):
+    class Broken(FakeXero):
+        def get_contacts(self, ids):
+            raise RuntimeError("Xero said no")
+
+    monkeypatch.setattr(oc, "XeroClient",
+                        Broken([invoice("A Ltd", 100, 30, "INV-1", email="")]))
+    ctx = RunContext(org_id="t", creds=FakeCreds(), log=lambda m: None)
+    result = oc.run({"connection": "default", "min_days_overdue": "1"}, ctx)
+
+    assert result.status is RunStatus.NEEDS_APPROVAL
+    assert result.rows[0]["contactable"] is False
