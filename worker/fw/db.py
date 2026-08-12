@@ -23,6 +23,7 @@ from sqlalchemy import (
     JSON,
     Column,
     DateTime,
+    Enum,
     ForeignKey,
     Index,
     LargeBinary,
@@ -31,35 +32,48 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    Uuid,
     create_engine,
     func,
 )
+
+# Identifiers are `Uuid`, not a char column. Postgres has a real uuid type and
+# rejects a varchar bind for it; SQLite has neither and stores char. Declaring
+# the intent lets SQLAlchemy pick per dialect. `as_uuid=False` keeps the Python
+# side as plain strings, which is what the API and JSON payloads want.
+_Id = Uuid(as_uuid=False)
+
+# `role` is a real enum type in Postgres (created by migration 0001), so a
+# varchar bind is rejected. Declared this way SQLAlchemy binds the enum on
+# Postgres and falls back to varchar-with-check on SQLite. The name must match
+# the type in the migration.
+_Role = Enum("admin", "member", "viewer", name="org_role", create_type=False)
 
 metadata = MetaData()
 
 orgs = Table(
     "orgs", metadata,
-    Column("id", String(36), primary_key=True),
+    Column("id", _Id, primary_key=True),
     Column("name", Text, nullable=False),
     Column("created_at", DateTime(timezone=True), server_default=func.now()),
 )
 
 org_members = Table(
     "org_members", metadata,
-    Column("org_id", String(36), ForeignKey("orgs.id", ondelete="CASCADE"),
+    Column("org_id", _Id, ForeignKey("orgs.id", ondelete="CASCADE"),
            primary_key=True),
-    Column("user_id", String(36), primary_key=True),
+    Column("user_id", _Id, primary_key=True),
     Column("email", Text, nullable=False),
     # admin: may connect integrations. member: may run and approve.
     # viewer: read only. Enforced in auth.py.
-    Column("role", Text, nullable=False, server_default="member"),
+    Column("role", _Role, nullable=False, server_default="member"),
     Column("created_at", DateTime(timezone=True), server_default=func.now()),
 )
 
 connections = Table(
     "connections", metadata,
-    Column("id", String(36), primary_key=True),
-    Column("org_id", String(36), ForeignKey("orgs.id", ondelete="CASCADE"),
+    Column("id", _Id, primary_key=True),
+    Column("org_id", _Id, ForeignKey("orgs.id", ondelete="CASCADE"),
            nullable=False),
     Column("provider", Text, nullable=False),
     Column("name", Text, nullable=False),
@@ -77,7 +91,7 @@ connections = Table(
 oauth_states = Table(
     "oauth_states", metadata,
     Column("state", String(64), primary_key=True),
-    Column("org_id", String(36), nullable=False),
+    Column("org_id", _Id, nullable=False),
     Column("provider", Text, nullable=False),
     Column("name", Text, nullable=False),
     Column("verifier", Text, nullable=False),
@@ -87,8 +101,8 @@ oauth_states = Table(
 
 vendor_bank_details = Table(
     "vendor_bank_details", metadata,
-    Column("id", String(36), primary_key=True),
-    Column("org_id", String(36), ForeignKey("orgs.id", ondelete="CASCADE"),
+    Column("id", _Id, primary_key=True),
+    Column("org_id", _Id, ForeignKey("orgs.id", ondelete="CASCADE"),
            nullable=False),
     Column("region", Text, nullable=False),
     Column("vendor", Text, nullable=False),
@@ -101,7 +115,7 @@ vendor_bank_details = Table(
 
 bank_layouts = Table(
     "bank_layouts", metadata,
-    Column("org_id", String(36), ForeignKey("orgs.id", ondelete="CASCADE"),
+    Column("org_id", _Id, ForeignKey("orgs.id", ondelete="CASCADE"),
            primary_key=True),
     Column("region", Text, primary_key=True),
     Column("columns", JSON, nullable=False),
@@ -110,8 +124,8 @@ bank_layouts = Table(
 
 runs = Table(
     "runs", metadata,
-    Column("id", String(36), primary_key=True),
-    Column("org_id", String(36), ForeignKey("orgs.id", ondelete="CASCADE"),
+    Column("id", _Id, primary_key=True),
+    Column("org_id", _Id, ForeignKey("orgs.id", ondelete="CASCADE"),
            nullable=False),
     Column("workflow", Text, nullable=False),
     Column("params", JSON, nullable=False),
