@@ -182,3 +182,66 @@ def test_google_app_resolution_falls_back_to_the_platform(engine, two_orgs,
 
     assert g._client(acme, apps)[0] == "ACME-GOOGLE"
     assert g._client(globex, apps)[0] == "PLATFORM-GOOGLE"
+
+
+# ---------------------------------------------------------------------------
+# Redirect URIs
+# ---------------------------------------------------------------------------
+
+def test_a_localhost_redirect_is_refused_on_a_public_host(engine, two_orgs,
+                                                          monkeypatch):
+    """The default is localhost so local development needs no configuration.
+    On a deployed host that default silently produces redirect_uri_mismatch,
+    and the provider's error names neither the variable nor the service."""
+    from fw import google as g
+    from fw.env import redirect_warning
+
+    monkeypatch.setenv("FW_ENV", "production")
+    monkeypatch.delenv("FW_GOOGLE_REDIRECT_URI", raising=False)
+    monkeypatch.setenv("FW_GOOGLE_CLIENT_ID", "PLATFORM")
+    monkeypatch.setenv("FW_GOOGLE_CLIENT_SECRET", "secret")
+
+    warning = redirect_warning(g.redirect_uri(), "FW_GOOGLE_REDIRECT_URI")
+    assert warning and "FW_GOOGLE_REDIRECT_URI" in warning
+
+    class Store:
+        def put(self, *a, **k):
+            raise AssertionError("consent must not be started")
+
+    with pytest.raises(g.GoogleError) as exc:
+        g.start(Store(), two_orgs[0], "default", "alice@acme.test")
+    assert "FW_GOOGLE_REDIRECT_URI" in str(exc.value)
+
+
+def test_localhost_is_fine_in_development(monkeypatch):
+    from fw.env import redirect_warning
+
+    monkeypatch.setenv("FW_ENV", "dev")
+    assert redirect_warning(
+        "http://localhost:8000/api/connections/google/callback",
+        "FW_GOOGLE_REDIRECT_URI") is None
+
+
+def test_a_public_redirect_passes(monkeypatch):
+    from fw.env import redirect_warning
+
+    monkeypatch.setenv("FW_ENV", "production")
+    assert redirect_warning(
+        "https://worker.example.com/api/connections/google/callback",
+        "FW_GOOGLE_REDIRECT_URI") is None
+
+
+def test_the_same_guard_covers_xero(engine, two_orgs, monkeypatch):
+    from fw import oauth as o
+
+    monkeypatch.setenv("FW_ENV", "production")
+    monkeypatch.delenv("FW_XERO_REDIRECT_URI", raising=False)
+    monkeypatch.setenv("FW_XERO_CLIENT_ID", "PLATFORM")
+
+    class Store:
+        def put(self, *a, **k):
+            raise AssertionError("consent must not be started")
+
+    with pytest.raises(o.OAuthError) as exc:
+        o.start(Store(), two_orgs[0], "default", "alice@acme.test")
+    assert "FW_XERO_REDIRECT_URI" in str(exc.value)

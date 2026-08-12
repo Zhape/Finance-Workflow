@@ -306,6 +306,9 @@
 		<div class="row">
 			<div class="who">
 				<div class="name">Gmail</div>
+				{#if gmail.redirectWarning}
+					<div class="meta warnmeta">{gmail.redirectWarning}</div>
+				{/if}
 				{#if gmail.connected}
 					<div class="meta">
 						Drafts will be created in <strong>{gmail.mailbox}</strong>. Approving a chase-up
@@ -321,6 +324,12 @@
 						Connect a mailbox and chase-ups will be drafted into it. Without this, a
 						chase-up still produces the list as a file.
 					</div>
+					{#if gmail.redirectUri}
+						<div class="meta">
+							This callback must be registered on the Google client, exactly:
+						</div>
+						<code class="uri">{gmail.redirectUri}</code>
+					{/if}
 				{/if}
 			</div>
 			<div class="actions">
@@ -438,6 +447,9 @@
 		gap: 8px;
 		margin-top: 8px;
 		flex-wrap: wrap;
+	}
+	.warnmeta {
+		color: var(--warn);
 	}
 	.uri {
 		flex: 1;

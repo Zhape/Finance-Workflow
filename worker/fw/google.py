@@ -90,6 +90,8 @@ def setup_status(org_id: str | None = None, apps=None) -> dict:
         "appConfigured": configured,
         "app": app,
         "redirectUri": redirect_uri(),
+        "redirectWarning": __import__("fw.env", fromlist=["env"]).redirect_warning(
+            redirect_uri(), "FW_GOOGLE_REDIRECT_URI"),
         "scopes": os.environ.get("FW_GOOGLE_SCOPES", DEFAULT_SCOPES).split(),
         "developerPortal": "https://console.cloud.google.com/apis/credentials",
         "canSend": False,
@@ -98,6 +100,13 @@ def setup_status(org_id: str | None = None, apps=None) -> dict:
 
 def start(state_store, org_id: str, name: str, user: str, apps=None) -> str:
     client_id, _secret, redirect = _client(org_id, apps)
+
+    from .env import redirect_warning
+
+    problem = redirect_warning(redirect, "FW_GOOGLE_REDIRECT_URI")
+    if problem:
+        # Refuse before sending someone to a consent screen that can only fail.
+        raise GoogleError(problem)
 
     verifier = _b64url(secrets.token_bytes(64))
     challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())

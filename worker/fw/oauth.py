@@ -120,6 +120,8 @@ def setup_status(org_id: str | None = None, apps=None) -> dict:
         "appConfigured": configured,
         "app": app,
         "redirectUri": redirect,
+        "redirectWarning": __import__("fw.env", fromlist=["env"]).redirect_warning(
+            redirect, "FW_XERO_REDIRECT_URI"),
         "scopes": os.environ.get("FW_XERO_SCOPES", DEFAULT_SCOPES).split(),
         # Never the client secret, and not the client id either: neither is
         # needed to follow the steps, and both are the platform's, not the org's.
@@ -130,6 +132,13 @@ def setup_status(org_id: str | None = None, apps=None) -> dict:
 def start(state_store, org_id: str, name: str, user: str, apps=None) -> str:
     """Create a PKCE challenge, stash the verifier, return the consent URL."""
     client_id, _secret, redirect = _client(org_id, apps)
+
+    from .env import redirect_warning
+
+    problem = redirect_warning(redirect, "FW_XERO_REDIRECT_URI")
+    if problem:
+        # Refuse before sending someone to a consent screen that can only fail.
+        raise OAuthError(problem)
 
     verifier = _b64url(secrets.token_bytes(64))
     challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
