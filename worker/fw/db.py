@@ -142,6 +142,11 @@ def database_url() -> str:
         # Supabase hands out postgres:// URLs; SQLAlchemy wants postgresql://.
         if url.startswith("postgres://"):
             url = "postgresql://" + url[len("postgres://"):]
+        # And a bare postgresql:// makes SQLAlchemy reach for psycopg2, which
+        # is not what we install. Pin the psycopg 3 driver explicitly so the
+        # connection string can be pasted in unmodified from Supabase.
+        if url.startswith("postgresql://"):
+            url = "postgresql+psycopg://" + url[len("postgresql://"):]
         return url
 
     from pathlib import Path
