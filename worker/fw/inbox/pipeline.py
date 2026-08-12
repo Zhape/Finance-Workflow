@@ -26,6 +26,14 @@ from .text import display_name, strip_quoted, html_to_text, suppression_reason
 from .verify import lookup as xero_lookup
 
 
+# How many emails one sync will classify. Ingestion is already capped; this
+# caps the expensive half. A backlog — after a classifier outage, or after
+# re-triaging what an outage mislabelled — would otherwise put a hundred model
+# calls and a hundred Xero lookups inside a single foreground request, which
+# times out and leaves the person no way to tell how far it got.
+MAX_TRIAGE_PER_SYNC = 25
+
+
 @dataclass
 class SyncReport:
     """What one press of the Sync button did."""
@@ -36,6 +44,7 @@ class SyncReport:
     triaged: int = 0
     failed: int = 0
     more_waiting: bool = False
+    untriaged: int = 0
     mailbox_errors: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
@@ -46,6 +55,7 @@ class SyncReport:
             "triaged": self.triaged,
             "failed": self.failed,
             "moreWaiting": self.more_waiting,
+            "untriaged": self.untriaged,
             "mailboxErrors": self.mailbox_errors,
         }
 
@@ -212,7 +222,17 @@ class Pipeline:
         self.s["emails"].set_state(self.org_id, email["id"], State.NEEDS_REVIEW)
 
     def triage_pending(self, report: SyncReport) -> None:
-        for email in self.s["emails"].pending(self.org_id):
+        waiting = self.s["emails"].pending(self.org_id)
+        if len(waiting) > MAX_TRIAGE_PER_SYNC:
+            # Oldest first, so a backlog drains in the order it arrived.
+            # Reported separately from `more_waiting`: "there is more mail to
+            # fetch" and "there is more mail to categorise" are different
+            # facts, and a person acts on them the same way but should not be
+            # told the first when only the second is true.
+            report.untriaged = len(waiting) - MAX_TRIAGE_PER_SYNC
+            waiting = waiting[:MAX_TRIAGE_PER_SYNC]
+
+        for email in waiting:
             try:
                 self.triage(email)
                 report.triaged += 1

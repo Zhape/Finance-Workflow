@@ -255,6 +255,31 @@ def test_the_lookup_outcome_is_recorded_on_every_email(
     assert stores["lookups"].latest(org, email["id"])["outcome"] == Outcome.FOUND
 
 
+def test_a_backlog_is_triaged_in_bounded_batches(engine, org, stores, mailbox):
+    """A hundred model calls in one request is a timeout, not a feature.
+
+    Re-triaging after a classifier outage produces exactly that backlog, so a
+    sync classifies a bounded batch, says how many are left, and drains the
+    rest on the next press.
+    """
+    from fw.inbox.pipeline import MAX_TRIAGE_PER_SYNC
+
+    total = MAX_TRIAGE_PER_SYNC + 7
+    messages = [dict(gmail_message(f"m{n}"), gmail_thread_id=f"t{n}")
+                for n in range(total)]
+    pipeline = build(org, stores, FakeClassifier(GOOD_ANSWER), FakeXero([INVOICE]))
+
+    first = run_sync(pipeline, mailbox, FakeGmail(messages))
+    assert first.ingested == total
+    assert first.triaged == MAX_TRIAGE_PER_SYNC
+    assert first.untriaged == 7
+
+    second = run_sync(pipeline, mailbox, FakeGmail(messages))
+    assert second.triaged == 7
+    assert second.untriaged == 0
+    assert stores["emails"].pending(org) == []
+
+
 def test_repeated_syncs_reach_older_mail(engine, org, stores, mailbox):
     """A regression test for the bug that lost four days of a real inbox.
 
