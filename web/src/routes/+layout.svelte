@@ -39,7 +39,13 @@
 			await signInWithPassword(email, password);
 			// Never keep the password in memory past the request that used it.
 			password = '';
-			await loadIdentity();
+			// Full reload, not a state update. Every page keeps the data it
+			// loaded under the previous session — tiles, run history, review
+			// rows — and updating the header while that data stays on screen is
+			// how one user was shown another organisation's dashboard. A reload
+			// is the only transition that provably discards all of it.
+			window.location.assign('/');
+			return;
 		} catch (e) {
 			authError = e.message;
 		}
@@ -48,8 +54,10 @@
 
 	function leave() {
 		signOut();
-		email = '';
-		password = '';
+		// Same reasoning as sign-in: nothing loaded by this user may survive
+		// into the next one's view. sessionStorage is already cleared by
+		// signOut(), synchronously, before the navigation starts.
+		window.location.assign('/');
 	}
 </script>
 
