@@ -1,5 +1,7 @@
 <script>
 	import { onMount } from 'svelte';
+	import { beforeNavigate } from '$app/navigation';
+	import { updated } from '$app/state';
 	import { api } from '$lib/api.js';
 	import {
 		applyIdentity,
@@ -18,6 +20,17 @@
 	let signingIn = $state(false);
 
 	onMount(loadIdentity);
+
+	// When a deploy has happened since this tab loaded, the next navigation
+	// becomes a real one, so the new bundle is picked up at a moment the user
+	// was changing pages anyway — rather than yanking the page out from under
+	// them mid-review.
+	beforeNavigate((navigation) => {
+		if (updated.current && navigation.to?.url) {
+			navigation.cancel();
+			window.location.assign(navigation.to.url.href);
+		}
+	});
 
 	async function loadIdentity() {
 		try {

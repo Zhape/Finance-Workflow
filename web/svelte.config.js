@@ -9,6 +9,11 @@ export default {
 		// comes from the worker, so there is nothing for a server to render.
 		// Building as a static SPA means no Node runtime on Vercel at all —
 		// which is also what removed the adapter-vercel Node-version failure.
-		adapter: adapter({ fallback: 'index.html', strict: false })
+		adapter: adapter({ fallback: 'index.html', strict: false }),
+		// A single-page app never refetches index.html on its own, so a tab
+		// opened before a deploy keeps running the old bundle for as long as it
+		// stays open. Polling version.json lets the client notice a new deploy;
+		// the layout turns the next navigation into a full reload when it does.
+		version: { pollInterval: 60_000 }
 	}
 };
