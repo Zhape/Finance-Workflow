@@ -71,8 +71,13 @@ services:
         sync: false
       - key: FW_XERO_REDIRECT_URI
         sync: false                # https://<this-service>.onrender.com/api/connections/xero/callback
+      # Where every OAuth callback sends the browser once consent is done, and
+      # the single allowed CORS origin. It pointed at the old Vercel host long
+      # after the web app moved here, so a successful Xero or Gmail connection
+      # ended on a 404 and looked like a failed one. It must be the host that
+      # actually serves the app.
       - key: FW_WEB_ORIGIN
-        value: https://finance-workflows.vercel.app
+        value: https://finance-workflows-web.onrender.com
       - key: SUPABASE_URL
         sync: false                # enables real JWT verification
 
