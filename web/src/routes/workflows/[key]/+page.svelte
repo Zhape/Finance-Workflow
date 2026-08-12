@@ -35,7 +35,12 @@
 
 <p class="crumb"><a href="/">← All workflows</a></p>
 <h1>{wf.name}</h1>
-<p class="lede">{wf.description}</p>
+<p class="lede">
+	{wf.description}
+	{#if wf.hasTemplates}
+		<a class="tmpl" href="/workflows/{wf.key}/templates">Edit the messages →</a>
+	{/if}
+</p>
 
 <form onsubmit={submit}>
 	{#each wf.params as p (p.name)}
@@ -94,6 +99,14 @@
 	.lede {
 		color: var(--muted);
 		margin: 0 0 24px;
+		max-width: 62ch;
+		line-height: 1.5;
+	}
+	.tmpl {
+		display: inline-block;
+		margin-left: 6px;
+		font-size: 0.85rem;
+		white-space: nowrap;
 	}
 	form {
 		max-width: 460px;

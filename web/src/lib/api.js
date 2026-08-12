@@ -83,6 +83,24 @@ export const api = {
 		send('/api/connections/xero/app', 'PUT', { clientId, clientSecret, label }),
 	clearXeroApp: () => send('/api/connections/xero/app', 'DELETE'),
 
+	googleSetup: (fetcher = fetch) => get('/api/connections/google/setup', fetcher),
+	connectGoogle: () => send('/api/connections/google/start', 'POST'),
+	disconnectGoogle: () => send('/api/connections/google', 'DELETE'),
+
+	templates: (key, fetcher = fetch) =>
+		get(`/api/workflows/${encodeURIComponent(key)}/templates`, fetcher),
+	saveTemplate: (key, variant, subject, body) =>
+		send(`/api/workflows/${encodeURIComponent(key)}/templates`, 'PUT', {
+			variant,
+			subject,
+			body
+		}),
+	resetTemplate: (key, variant) =>
+		send(
+			`/api/workflows/${encodeURIComponent(key)}/templates/${encodeURIComponent(variant)}`,
+			'DELETE'
+		),
+
 	start: (workflow, params) => send('/api/runs', 'POST', { workflow, params }),
 	approve: (id, rowIds) => send(`/api/runs/${id}/approve`, 'POST', { rowIds }),
 	connectXero: (name = 'default') =>

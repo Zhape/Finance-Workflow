@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel
 
-from . import env, oauth, workflows
+from . import env, google, oauth, workflows
 
 env.load()  # before anything reads os.environ
 
@@ -36,6 +36,7 @@ from .stores import (
     OAuthStateStore,
     OrgStore,
     RunStore,
+    TemplateStore,
     VendorStore,
     WorkflowAccessStore,
 )
@@ -61,10 +62,36 @@ ORGS = OrgStore(ENGINE)
 STATES = OAuthStateStore(ENGINE)
 LAYOUTS = LayoutStore(ENGINE)
 ACCESS = WorkflowAccessStore(ENGINE)
+TEMPLATES = TemplateStore(ENGINE)
 
 
 def _apps() -> ProviderAppStore:
     return ProviderAppStore(ENGINE, Cipher())
+
+
+def _google_apps() -> ProviderAppStore:
+    return ProviderAppStore(ENGINE, Cipher(), provider=google.PROVIDER)
+
+
+def _google_connections() -> ConnectionStore:
+    return ConnectionStore(ENGINE, Cipher(), provider=google.PROVIDER)
+
+
+def _mailer(org_id: str):
+    """A drafter if this org has connected Gmail, else None.
+
+    None rather than an exception: a workflow must degrade to producing a file
+    rather than failing because email is not set up."""
+    if _google_connections().load(org_id, "default") is None:
+        return None
+    return google.GmailDrafter(org_id, _google_connections(), _google_apps(),
+                               log=lambda m: None)
+
+
+def _defaults_for(module):
+    """The wording a workflow ships with, if it has any."""
+    getter = getattr(module, "default_templates", None)
+    return getter() if getter else {}
 
 
 def _connections() -> ConnectionStore:
@@ -146,9 +173,16 @@ def list_workflows(principal: Principal = Depends(me)):
     customers run.
     """
     allowed = ACCESS.keys(principal.org_id)
-    return {
-        "workflows": [s.to_json() for s in workflows.specs() if s.key in allowed]
-    }
+    out = []
+    for spec in workflows.specs():
+        if spec.key not in allowed:
+            continue
+        item = spec.to_json()
+        # Whether the workflow has editable wording is a property of the
+        # module, not something the UI should hardcode by key.
+        item["hasTemplates"] = bool(_defaults_for(workflows.get(spec.key)))
+        out.append(item)
+    return {"workflows": out}
 
 
 class WorkflowGrant(BaseModel):
@@ -263,6 +297,116 @@ def clear_xero_app(principal: Principal = Depends(me)):
     return {"ok": True, "disconnected": dropped}
 
 
+@app.get("/api/connections/google/setup")
+def google_setup(principal: Principal = Depends(me)):
+    status = google.setup_status(principal.org_id, _google_apps())
+    conn = _google_connections().load(principal.org_id, "default")
+    status["connected"] = conn is not None
+    status["mailbox"] = (conn or {}).get("mailbox")
+    return status
+
+
+@app.post("/api/connections/google/start")
+def start_google(principal: Principal = Depends(me)):
+    principal.require("admin")
+    try:
+        url = google.start(STATES, principal.org_id, "default",
+                           principal.email, _google_apps())
+    except google.GoogleError as exc:
+        raise HTTPException(500, str(exc)) from None
+    return {"url": url}
+
+
+@app.get("/api/connections/google/callback")
+def google_callback(code: str | None = None, state: str | None = None,
+                    error: str | None = None):
+    if error:
+        return RedirectResponse(f"{WEB_ORIGIN}/settings?error={error}")
+    if not code or not state:
+        return RedirectResponse(f"{WEB_ORIGIN}/settings?error=missing_code")
+
+    pending = STATES.take(state)
+    if pending is None:
+        return RedirectResponse(f"{WEB_ORIGIN}/settings?error=expired_state")
+
+    try:
+        token = google.exchange(code, pending["verifier"], pending["org_id"],
+                                _google_apps())
+        if not token.get("refresh_token"):
+            # Without one, every run after the first hour would fail. Better to
+            # refuse now than to store a connection that quietly expires.
+            return RedirectResponse(f"{WEB_ORIGIN}/settings?error=no_refresh_token")
+        token["mailbox"] = google.mailbox(token["access_token"])
+        token["connected_by"] = pending["created_by"]
+        _google_connections().save(pending["org_id"], "default", token)
+    except (google.GoogleError, EncryptionError):
+        return RedirectResponse(f"{WEB_ORIGIN}/settings?error=exchange_failed")
+
+    return RedirectResponse(f"{WEB_ORIGIN}/settings?connected=gmail")
+
+
+@app.delete("/api/connections/google")
+def disconnect_google(principal: Principal = Depends(me)):
+    principal.require("admin")
+    if not _google_connections().disconnect(principal.org_id, "default"):
+        raise HTTPException(404, "Gmail is not connected.")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Message templates
+# ---------------------------------------------------------------------------
+
+@app.get("/api/workflows/{key}/templates")
+def get_templates(key: str, principal: Principal = Depends(me)):
+    if not ACCESS.has(principal.org_id, key):
+        raise HTTPException(404, f"Unknown workflow {key!r}")
+    module = workflows.get(key)
+    defaults = _defaults_for(module)
+    if not defaults:
+        raise HTTPException(404, "This workflow has no editable templates.")
+    return {
+        "workflow": key,
+        "placeholders": [
+            {"token": tok, "description": desc}
+            for tok, desc in getattr(module, "PLACEHOLDERS", [])
+        ],
+        "templates": TEMPLATES.merged(principal.org_id, key, defaults),
+    }
+
+
+class TemplateEdit(BaseModel):
+    variant: str
+    subject: str
+    body: str
+
+
+@app.put("/api/workflows/{key}/templates")
+def save_template(key: str, body: TemplateEdit,
+                  principal: Principal = Depends(me)):
+    principal.require("member")
+    if not ACCESS.has(principal.org_id, key):
+        raise HTTPException(404, f"Unknown workflow {key!r}")
+    defaults = _defaults_for(workflows.get(key))
+    if body.variant not in defaults:
+        raise HTTPException(422, f"Unknown template {body.variant!r}")
+    if not body.body.strip():
+        raise HTTPException(422, "The message body cannot be empty.")
+    TEMPLATES.save(principal.org_id, key, body.variant,
+                   body.subject, body.body, principal.email)
+    return {"ok": True}
+
+
+@app.delete("/api/workflows/{key}/templates/{variant}")
+def reset_template(key: str, variant: str, principal: Principal = Depends(me)):
+    principal.require("member")
+    if not ACCESS.has(principal.org_id, key):
+        raise HTTPException(404, f"Unknown workflow {key!r}")
+    if not TEMPLATES.reset(principal.org_id, key, variant):
+        raise HTTPException(404, "That template is not customised.")
+    return {"ok": True}
+
+
 @app.delete("/api/connections/{name}")
 def disconnect(name: str, principal: Principal = Depends(me)):
     principal.require("admin")
@@ -322,6 +466,10 @@ def start_run(body: StartRun, principal: Principal = Depends(me)):
                               apps=_apps()),
         # Only region-based workflows need vendor banking data.
         bank_details=VendorStore(ENGINE, principal.org_id, region) if region else None,
+        templates=TEMPLATES.merged(principal.org_id, body.workflow,
+                                   _defaults_for(module)) or None,
+        mailer=_mailer(principal.org_id),
+        sender_name=principal.email.split("@")[0].replace(".", " ").title(),
         log=lambda m: None,
     )
 
@@ -374,7 +522,15 @@ def approve(run_id: str, body: Approve, principal: Principal = Depends(me)):
             )
 
     module = workflows.get(run["workflow"])
-    ctx = RunContext(org_id=principal.org_id, creds=None, log=lambda m: None)
+    ctx = RunContext(
+        org_id=principal.org_id,
+        creds=None,
+        templates=TEMPLATES.merged(principal.org_id, run["workflow"],
+                                   _defaults_for(module)) or None,
+        mailer=_mailer(principal.org_id),
+        sender_name=principal.email.split("@")[0].replace(".", " ").title(),
+        log=lambda m: None,
+    )
     try:
         result = module.finalise(run["params"], chosen, ctx, columns)
     except Exception as exc:  # noqa: BLE001

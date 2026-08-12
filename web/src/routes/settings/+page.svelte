@@ -21,6 +21,8 @@
 
 	const ERRORS = {
 		expired_state: 'That took longer than 10 minutes, so the request expired. Start again.',
+		no_refresh_token:
+			'Google did not return a long-lived token, so runs would stop working within the hour. Remove this app under your Google Account permissions and connect again.',
 		exchange_failed:
 			'Xero rejected the authorisation. The usual cause is the redirect URI not matching the one registered on the Xero app — check step 2 below.',
 		no_organisations:
@@ -40,6 +42,9 @@
 	// The org's own Xero application. The secret is never sent back by the API,
 	// so the field is always blank on load: there is nothing to prefill, and a
 	// masked placeholder would only imply we could show it.
+	let gmail = $state(null);
+	let gmailBusy = $state(false);
+
 	let clientId = $state('');
 	let clientSecret = $state('');
 	let appBusy = $state(false);
@@ -58,6 +63,11 @@
 			setup = await api.xeroSetup();
 		} catch {
 			setup = null;
+		}
+		try {
+			gmail = await api.googleSetup();
+		} catch {
+			gmail = null;
 		}
 		// Open the walkthrough by default when there is something left to connect,
 		// and after a failed callback — those are the moments it is needed.
@@ -121,6 +131,30 @@
 			error = e.message;
 		}
 		appBusy = false;
+	}
+
+	async function connectGmail() {
+		gmailBusy = true;
+		error = '';
+		try {
+			const { url } = await api.connectGoogle();
+			window.location.href = url;
+		} catch (e) {
+			error = e.message;
+			gmailBusy = false;
+		}
+	}
+
+	async function disconnectGmail() {
+		gmailBusy = true;
+		error = '';
+		try {
+			await api.disconnectGoogle();
+			gmail = await api.googleSetup();
+		} catch (e) {
+			error = e.message;
+		}
+		gmailBusy = false;
 	}
 
 	async function connect(name) {
@@ -331,6 +365,54 @@
 
 {#if !isAdmin}
 	<p class="note">Only an admin can connect or disconnect integrations. Yours is {session.role}.</p>
+{/if}
+
+<h2>Email</h2>
+{#if gmail}
+	<div class="rows">
+		<div class="row">
+			<div class="who">
+				<div class="name">Gmail</div>
+				{#if gmail.connected}
+					<div class="meta">
+						Drafts will be created in <strong>{gmail.mailbox}</strong>. Approving a chase-up
+						writes one draft per customer, ready for you to read and send.
+					</div>
+				{:else if !gmail.appConfigured}
+					<div class="meta">
+						No Google application is configured on this deployment, so Gmail cannot be
+						connected yet.
+					</div>
+				{:else}
+					<div class="meta">
+						Connect a mailbox and chase-ups will be drafted into it. Without this, a
+						chase-up still produces the list as a file.
+					</div>
+				{/if}
+			</div>
+			<div class="actions">
+				{#if gmail.connected}
+					<span class="pill ok">Connected</span>
+					<button class="ghost" disabled={!isAdmin || gmailBusy} onclick={disconnectGmail}>
+						Disconnect
+					</button>
+				{:else}
+					<button
+						disabled={!isAdmin || gmailBusy || !gmail.appConfigured}
+						onclick={connectGmail}
+					>
+						{gmailBusy ? 'Opening Google…' : 'Connect Gmail'}
+					</button>
+				{/if}
+			</div>
+		</div>
+	</div>
+
+	<p class="note">
+		This app asks for permission to <strong>create drafts only</strong>. The Gmail scope it
+		requests cannot send mail, cannot read your inbox, and cannot delete anything — so a mistake
+		here costs you some drafts to tidy up, not an email a customer should never have seen.
+	</p>
 {/if}
 
 <p class="note">

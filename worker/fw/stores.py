@@ -22,6 +22,7 @@ from .banking import norm_header, norm_vendor, normalise_account
 from .crypto import Cipher
 from .db import (
     org_workflows,
+    workflow_templates,
     provider_apps,
     bank_layouts,
     connections,
@@ -164,6 +165,94 @@ class ConnectionStore:
                 .where(connections.c.name == connection)
             )
         return result.rowcount > 0
+
+
+class TemplateStore:
+    """Per-org message templates, falling back to the workflow's defaults.
+
+    Absence of a row means "use the default". That is why `get` merges rather
+    than seeding rows at org creation: an org that never edits the wording
+    keeps receiving improvements to it, while an org that has edited keeps its
+    own words even when the shipped default changes.
+    """
+
+    def __init__(self, engine):
+        self._engine = engine
+
+    def overrides(self, org_id: str, workflow_key: str) -> dict[str, dict]:
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(workflow_templates.c.variant,
+                       workflow_templates.c.subject,
+                       workflow_templates.c.body,
+                       workflow_templates.c.updated_by,
+                       workflow_templates.c.updated_at)
+                .where(workflow_templates.c.org_id == org_id)
+                .where(workflow_templates.c.workflow_key == workflow_key)
+            ).all()
+        return {
+            r.variant: {
+                "subject": r.subject,
+                "body": r.body,
+                "updatedBy": r.updated_by,
+                "updatedAt": r.updated_at.isoformat() if r.updated_at else None,
+            }
+            for r in rows
+        }
+
+    def merged(self, org_id: str, workflow_key: str,
+               defaults: dict[str, dict]) -> dict[str, dict]:
+        """Defaults with this org's overrides applied, marked so the UI can
+        show which are customised."""
+        custom = self.overrides(org_id, workflow_key)
+        out: dict[str, dict] = {}
+        for variant, default in defaults.items():
+            override = custom.get(variant)
+            out[variant] = {
+                "subject": (override or default)["subject"],
+                "body": (override or default)["body"],
+                "customised": override is not None,
+                "default": default,
+                "updatedBy": (override or {}).get("updatedBy"),
+                "updatedAt": (override or {}).get("updatedAt"),
+            }
+        return out
+
+    def save(self, org_id: str, workflow_key: str, variant: str,
+             subject: str, body: str, user: str) -> None:
+        values = {"subject": subject, "body": body,
+                  "updated_by": user, "updated_at": _now()}
+        with self._engine.begin() as conn:
+            existing = conn.execute(
+                select(workflow_templates.c.variant)
+                .where(workflow_templates.c.org_id == org_id)
+                .where(workflow_templates.c.workflow_key == workflow_key)
+                .where(workflow_templates.c.variant == variant)
+            ).first()
+            if existing:
+                conn.execute(
+                    update(workflow_templates)
+                    .where(workflow_templates.c.org_id == org_id)
+                    .where(workflow_templates.c.workflow_key == workflow_key)
+                    .where(workflow_templates.c.variant == variant)
+                    .values(**values)
+                )
+            else:
+                conn.execute(insert(workflow_templates).values(
+                    org_id=org_id, workflow_key=workflow_key,
+                    variant=variant, **values
+                ))
+
+    def reset(self, org_id: str, workflow_key: str,
+              variant: str | None = None) -> int:
+        """Drop overrides, reverting to the shipped wording."""
+        stmt = (delete(workflow_templates)
+                .where(workflow_templates.c.org_id == org_id)
+                .where(workflow_templates.c.workflow_key == workflow_key))
+        if variant:
+            stmt = stmt.where(workflow_templates.c.variant == variant)
+        with self._engine.begin() as conn:
+            return conn.execute(stmt).rowcount
 
 
 class WorkflowAccessStore:

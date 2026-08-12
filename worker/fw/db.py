@@ -149,6 +149,20 @@ org_workflows = Table(
     Column("enabled_at", DateTime(timezone=True), server_default=func.now()),
 )
 
+# Per-org message templates. Absence of a row means "use the workflow's
+# default", so unedited orgs keep receiving improvements to the shipped wording.
+workflow_templates = Table(
+    "workflow_templates", metadata,
+    Column("org_id", _Id, ForeignKey("orgs.id", ondelete="CASCADE"),
+           primary_key=True),
+    Column("workflow_key", Text, primary_key=True),
+    Column("variant", Text, primary_key=True),
+    Column("subject", Text, nullable=False, server_default=""),
+    Column("body", Text, nullable=False, server_default=""),
+    Column("updated_by", Text),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
+)
+
 runs = Table(
     "runs", metadata,
     Column("id", _Id, primary_key=True),

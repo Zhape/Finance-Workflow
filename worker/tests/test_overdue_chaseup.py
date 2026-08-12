@@ -165,7 +165,7 @@ def test_greeting_uses_a_first_name_for_people_and_the_whole_name_for_companies(
 # Output
 # ---------------------------------------------------------------------------
 
-def test_finalise_writes_a_chase_list_and_sends_nothing(monkeypatch):
+def test_finalise_writes_a_chase_list(monkeypatch):
     result = run([invoice("Acme Ltd", 100, 45)], monkeypatch)
     ctx = RunContext(org_id="t", creds=None, log=lambda m: None)
     final = oc.finalise({}, result.rows, ctx, [])
@@ -175,4 +175,102 @@ def test_finalise_writes_a_chase_list_and_sends_nothing(monkeypatch):
     assert header.startswith("customer,email,currency,amount_owed")
     assert "Acme Ltd" in row
     assert final.status is RunStatus.COMPLETE
+
+
+def test_without_gmail_nothing_is_drafted_and_it_says_so(monkeypatch):
+    result = run([invoice("Acme Ltd", 100, 45)], monkeypatch)
+    ctx = RunContext(org_id="t", creds=None, mailer=None, log=lambda m: None)
+    final = oc.finalise({}, result.rows, ctx, [])
+    assert "not connected" in final.summary
+    assert final.artifact_bytes  # the file is produced regardless
+
+
+class FakeMailer:
+    """Stands in for GmailDrafter. Records drafts; cannot send, same as the
+    real thing."""
+
+    address = "finance@company.test"
+
+    def __init__(self, fail_for: set[str] | None = None):
+        self.drafts: list[tuple[str, str, str]] = []
+        self._fail_for = fail_for or set()
+
+    def create_draft(self, to, subject, body):
+        if to in self._fail_for:
+            raise RuntimeError("mailbox rejected it")
+        self.drafts.append((to, subject, body))
+        return f"draft-{len(self.drafts)}"
+
+
+def test_with_gmail_one_draft_per_customer(monkeypatch):
+    result = run([
+        invoice("Acme Ltd", 100, 45, "INV-1", email="ap@acme.test"),
+        invoice("Beta Ltd", 200, 95, "INV-2", email="ap@beta.test"),
+    ], monkeypatch)
+    mailer = FakeMailer()
+    ctx = RunContext(org_id="t", creds=None, mailer=mailer, log=lambda m: None)
+    final = oc.finalise({}, result.rows, ctx, [])
+
+    assert len(mailer.drafts) == 2
+    assert {d[0] for d in mailer.drafts} == {"ap@acme.test", "ap@beta.test"}
+    assert "2 draft(s) created" in final.summary
+    assert "finance@company.test" in final.summary
     assert "Nothing has been sent" in final.summary
+
+
+def test_customers_without_an_email_are_skipped_not_failed(monkeypatch):
+    result = run([
+        invoice("Acme Ltd", 100, 45, "INV-1", email="ap@acme.test"),
+        invoice("No Email Ltd", 200, 45, "INV-2", email=""),
+    ], monkeypatch)
+    mailer = FakeMailer()
+    ctx = RunContext(org_id="t", creds=None, mailer=mailer, log=lambda m: None)
+    final = oc.finalise({}, result.rows, ctx, [])
+
+    assert len(mailer.drafts) == 1
+    assert not final.warnings
+
+
+def test_one_failed_draft_does_not_lose_the_rest(monkeypatch):
+    """A mailbox rejecting one address must not cost the other twenty."""
+    result = run([
+        invoice("Good Ltd", 100, 45, "INV-1", email="ok@good.test"),
+        invoice("Bad Ltd", 200, 45, "INV-2", email="bad@bad.test"),
+    ], monkeypatch)
+    mailer = FakeMailer(fail_for={"bad@bad.test"})
+    ctx = RunContext(org_id="t", creds=None, mailer=mailer, log=lambda m: None)
+    final = oc.finalise({}, result.rows, ctx, [])
+
+    assert len(mailer.drafts) == 1
+    assert final.status is RunStatus.COMPLETE
+    assert "Bad Ltd" in final.warnings[0]
+    assert final.artifact_bytes
+
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+
+def test_org_templates_override_the_shipped_wording(monkeypatch):
+    monkeypatch.setattr(oc, "XeroClient", FakeXero([invoice("Acme Ltd", 100, 45)]))
+    ctx = RunContext(
+        org_id="t", creds=FakeCreds(), log=lambda m: None,
+        templates={"reminder": {"subject": "Your account, {customer}",
+                                "body": "Pay {currency} {amount} please."}},
+    )
+    result = oc.run({"connection": "default", "min_days_overdue": "1"}, ctx)
+    row = result.rows[0]
+    assert row["subject"] == "Your account, Acme Ltd"
+    assert row["message"] == "Pay GBP 100.00 please."
+
+
+def test_a_typo_in_a_placeholder_shows_rather_than_crashing():
+    out = oc.render("Hi {first}, you owe {nonsense}", {"first": "Sam"})
+    assert out == "Hi Sam, you owe {nonsense}"
+
+
+def test_shipped_defaults_cover_every_tone():
+    defaults = oc.default_templates()
+    assert set(defaults) == {t for _, _, t in oc.BUCKETS}
+    for variant in defaults.values():
+        assert variant["subject"] and variant["body"]

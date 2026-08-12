@@ -87,6 +87,13 @@ class RunContext:
     org_id: str
     creds: "CredentialProvider"
     bank_details: Any = None          # BankDetailsSource, when the workflow needs one
+    # The org's message templates, already merged over the workflow's defaults.
+    templates: dict[str, dict] | None = None
+    # Creates email drafts when the org has connected a mailbox. None means
+    # not connected, and a workflow must degrade rather than fail: producing a
+    # file is still useful without email.
+    mailer: Any = None
+    sender_name: str | None = None
     log: Callable[[str], None] = print
 
 

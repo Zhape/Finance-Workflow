@@ -3,12 +3,12 @@
 The hosted version of the desktop overdue-chaseup app, with two deliberate
 differences.
 
-**It does not send email.** The desktop app sends through Gmail with an app
-password belonging to one person. Hosted, that would mean either holding every
-customer's mail credentials or sending as the platform — the first is a
-liability, the second gets marked as spam and misattributes the chase. So this
-produces the chase list and the drafted message per customer; sending stays a
-human action until there is a per-org verified sender.
+**It drafts, it does not send.** With Gmail connected, approving a run creates
+a draft per customer in the connected mailbox, ready to read and send. The
+Gmail scope requested (`gmail.compose`) cannot send at all, so this is a
+ceiling enforced by Google rather than a promise in a comment. A chase is a
+relationship, and the person whose name is on the email should see it before
+the customer does.
 
 **It does not scrape the platform.** The desktop app drives a browser to look
 up account admins, and that flow needs an interactive login it cannot perform
@@ -82,6 +82,30 @@ BUCKETS: list[tuple[int, str, str]] = [
     (30, "30-59 days", "reminder"),
     (0, "1-29 days", "gentle"),
 ]
+
+# Shipped defaults. An org can override any of these in Settings; absence of
+# an override means it keeps getting improvements to this wording.
+#
+# Placeholders are deliberately few and obvious. Every one is something the
+# workflow knows for certain, because a template that can reference a field
+# that is sometimes missing produces "Hi {first}," in a customer's inbox.
+PLACEHOLDERS = [
+    ("{first}", "Customer's first name, or the company name"),
+    ("{customer}", "Full customer name as it appears in Xero"),
+    ("{count}", "How many invoices are overdue"),
+    ("{amount}", "Total owed, formatted (e.g. 6,000.00)"),
+    ("{currency}", "Currency code (e.g. GBP)"),
+    ("{days}", "Days past due on the oldest invoice"),
+    ("{invoices}", "Invoice numbers, comma separated"),
+    ("{sender}", "Name the message is signed with"),
+]
+
+DEFAULT_SUBJECTS = {
+    "gentle": "Overdue invoice{plural} - {currency} {amount}",
+    "reminder": "Reminder: {currency} {amount} overdue",
+    "firm": "Overdue account - {currency} {amount} - response needed",
+    "final": "Final notice: {currency} {amount} overdue",
+}
 
 TEMPLATES = {
     "gentle": (
@@ -170,6 +194,26 @@ def first_name(contact_name: str) -> str:
     return name
 
 
+def default_templates() -> dict[str, dict[str, str]]:
+    """The wording this workflow ships with, in the shape the editor expects."""
+    return {
+        tone: {"subject": DEFAULT_SUBJECTS[tone], "body": TEMPLATES[tone]}
+        for tone in TEMPLATES
+    }
+
+
+def render(template: str, values: dict[str, Any]) -> str:
+    """Fill a template, leaving unknown placeholders visible rather than
+    exploding. Someone editing wording should see `{typo}` in the preview, not
+    a 500 at the end of a run."""
+
+    class _Safe(dict):
+        def __missing__(self, key):
+            return "{" + key + "}"
+
+    return template.format_map(_Safe(values))
+
+
 def run(params: dict[str, Any], ctx: RunContext) -> RunResult:
     log: list[str] = []
     warnings: list[str] = []
@@ -229,11 +273,25 @@ def run(params: dict[str, Any], ctx: RunContext) -> RunResult:
     note(f"{len(by_contact)} customer(s) past {min_days} days")
 
     sender = getattr(ctx, "sender_name", None) or "Accounts"
+    templates = ctx.templates or default_templates()
     rows: list[dict[str, Any]] = []
     for cid, e in by_contact.items():
         if e["amount"] < min_amount:
             continue
         label, tone = bucket_for(e["oldest_days"])
+        refs = ", ".join(dict.fromkeys(e["references"])) or None
+        values = {
+            "first": first_name(e["name"]),
+            "customer": e["name"],
+            "count": e["count"],
+            "currency": e["currency"],
+            "amount": f"{e['amount']:,.2f}",
+            "days": e["oldest_days"],
+            "invoices": refs or "",
+            "sender": sender,
+            "plural": "" if e["count"] == 1 else "s",
+        }
+        chosen = templates.get(tone) or default_templates()[tone]
         rows.append({
             "id": str(cid),
             "name": e["name"],
@@ -244,16 +302,10 @@ def run(params: dict[str, Any], ctx: RunContext) -> RunResult:
             "oldest_days": e["oldest_days"],
             "bucket": label,
             "tone": tone,
-            "references": ", ".join(dict.fromkeys(e["references"])) or None,
+            "references": refs,
             "contactable": bool(e["email"]),
-            "message": TEMPLATES[tone].format(
-                first=first_name(e["name"]),
-                count=e["count"],
-                currency=e["currency"],
-                amount=f"{e['amount']:,.2f}",
-                days=e["oldest_days"],
-                sender=sender,
-            ),
+            "subject": render(chosen.get("subject", ""), values),
+            "message": render(chosen.get("body", ""), values),
         })
 
     # Oldest and largest first: that is the order a person would work the list.
@@ -303,7 +355,12 @@ def finalise(
     ctx: RunContext,
     columns: list[str],
 ) -> RunResult:
-    """Produce the chase list as a CSV, one row per customer with its message.
+    """Create a Gmail draft per approved customer, and the chase list as a CSV.
+
+    Drafting is best-effort per row: one customer whose draft fails must not
+    lose the other twenty. Failures are collected and reported rather than
+    raised, and the CSV is produced either way — a run that half-worked should
+    still hand back something usable.
 
     `columns` is ignored: unlike a pay run there is no bank template dictating
     layout. It stays in the signature because the platform calls every workflow
@@ -313,28 +370,58 @@ def finalise(
     import csv
     import io
 
+    drafted = 0
+    failures: list[str] = []
+    mailbox = None
+    if ctx.mailer is not None:
+        for r in rows:
+            if not r.get("email"):
+                continue
+            try:
+                ctx.mailer.create_draft(
+                    r["email"],
+                    r.get("subject") or "Overdue invoice",
+                    r.get("message") or "",
+                )
+                drafted += 1
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{r.get('name')}: {type(exc).__name__}")
+        mailbox = getattr(ctx.mailer, "address", None)
+
     buf = io.StringIO(newline="")
     writer = csv.writer(buf)
     header = ["customer", "email", "currency", "amount_owed", "invoices",
-              "days_overdue", "age_bucket", "invoice_numbers", "message"]
+              "days_overdue", "age_bucket", "invoice_numbers", "subject",
+              "message"]
     writer.writerow(header)
     for r in rows:
         writer.writerow([
             r.get("name"), r.get("email") or "", r.get("currency"),
             f"{to_float(r.get('amount')):.2f}", r.get("count"),
             r.get("oldest_days"), r.get("bucket"),
-            r.get("references") or "", r.get("message") or "",
+            r.get("references") or "", r.get("subject") or "",
+            r.get("message") or "",
         ])
 
     total = sum(to_float(r.get("amount")) for r in rows)
     stamp = datetime.now().strftime("%Y-%m-%d")
+
+    if ctx.mailer is None:
+        outcome = (f"{len(rows)} chase message(s) prepared, {total:,.2f} "
+                   f"outstanding. Gmail is not connected, so nothing was "
+                   f"drafted.")
+    else:
+        where = f" in {mailbox}" if mailbox else ""
+        outcome = (f"{drafted} draft(s) created{where}, {total:,.2f} "
+                   f"outstanding. Nothing has been sent — review and send from "
+                   f"Gmail.")
+
     return RunResult(
         status=RunStatus.COMPLETE,
         rows=rows,
-        summary=(
-            f"{len(rows)} chase message(s) prepared, {total:,.2f} outstanding. "
-            f"Nothing has been sent."
-        ),
+        warnings=([f"Could not draft for {len(failures)} customer(s): "
+                   + ", ".join(failures[:5])] if failures else []),
+        summary=outcome,
         artifact_name=f"chase-list-{stamp}.csv",
         artifact_bytes=buf.getvalue().encode("utf-8-sig"),
     )
