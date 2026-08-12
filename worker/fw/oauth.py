@@ -27,10 +27,20 @@ AUTHORIZE_URL = "https://login.xero.com/identity/connect/authorize"
 TOKEN_URL = "https://identity.xero.com/connect/token"
 CONNECTIONS_URL = "https://api.xero.com/connections"
 
+# Granular scopes. Xero split the broad `accounting.transactions` scope into
+# accounting.invoices / payments / banktransactions / manualjournals, and apps
+# created on or after 2 March 2026 have no access to the broad scopes at all --
+# requesting one returns invalid_scope before the consent screen appears.
+# Scopes for contacts, settings, attachments and budgets were unchanged.
+#
+# This workflow reads Accounts Payable bills, which live under the Invoices
+# endpoint, so `accounting.invoices.read` is the replacement. Contacts stays
+# because vendor name and email are matched from the bill's contact. Nothing
+# here grants write access: every scope is `.read`, and the platform has no
+# code that writes to Xero.
 DEFAULT_SCOPES = (
     "openid profile email offline_access "
-    "accounting.transactions.read accounting.contacts.read "
-    "accounting.settings.read"
+    "accounting.invoices.read accounting.contacts.read"
 )
 
 
