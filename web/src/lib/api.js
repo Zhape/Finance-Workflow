@@ -6,18 +6,10 @@
  * it up, so a tampered header gets a 404, not someone else's data.
  */
 
-import { env } from '$env/dynamic/public';
-
+import { API_BASE as CONFIGURED_API_BASE } from './config.js';
 import { refreshSession, session } from './session.svelte.js';
 
-/** Where the worker lives.
- *
- * Empty in dev: Vite proxies /api to localhost:8000. In production there is no
- * proxy and the worker is on its own host (it cannot be a Vercel function — a
- * Xero pull outlives the timeout), so the browser calls it directly and the
- * worker allows the origin via FW_WEB_ORIGIN.
- */
-export const API_BASE = (env.PUBLIC_API_BASE ?? '').replace(/\/$/, '');
+export const API_BASE = CONFIGURED_API_BASE.replace(/\/$/, '');
 export const workerConfigured = Boolean(API_BASE) || !import.meta.env.PROD;
 
 const url = (path) => `${API_BASE}${path}`;

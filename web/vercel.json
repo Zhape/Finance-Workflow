@@ -3,5 +3,12 @@
   "framework": null,
   "buildCommand": "npm run build",
   "outputDirectory": "build",
+  "build": {
+    "env": {
+      "PUBLIC_SUPABASE_URL": "https://zacgedjltfkiyfydghtp.supabase.co",
+      "PUBLIC_SUPABASE_ANON_KEY": "sb_publishable_9YgapTPLHUm-tVbPwq2AcA_JpMgf-66",
+      "PUBLIC_API_BASE": ""
+    }
+  },
   "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
 }

@@ -12,12 +12,9 @@
  * membership row gets a 403.
  */
 
-// Dynamic rather than static: these are unset in local dev, and static env
-// turns a missing variable into a build failure.
-import { env } from '$env/dynamic/public';
+import { SUPABASE_ANON_KEY, SUPABASE_URL as RAW_SUPABASE_URL } from './config.js';
 
-const SUPABASE_URL = (env.PUBLIC_SUPABASE_URL ?? '').replace(/\/$/, '');
-const SUPABASE_ANON_KEY = env.PUBLIC_SUPABASE_ANON_KEY ?? '';
+const SUPABASE_URL = RAW_SUPABASE_URL.replace(/\/$/, '');
 
 export const supabaseConfigured = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 

@@ -20,6 +20,13 @@
 	onMount(loadIdentity);
 
 	async function loadIdentity() {
+		// With no worker, /api/* falls through the SPA rewrite and returns the
+		// index page. Calling it would surface a JSON parse error to someone who
+		// has done nothing wrong; the layout already explains the real problem.
+		if (!workerConfigured) {
+			ready = true;
+			return;
+		}
 		try {
 			applyIdentity(await api.me());
 			authError = '';
@@ -74,16 +81,10 @@
 			<p class="muted">Loading…</p>
 		{:else if session.email}
 			{@render children()}
-		{:else if !workerConfigured}
-			<div class="signin">
-				<h1>No worker configured</h1>
-				<p class="muted">
-					The interface is deployed, but the workflow worker is a separate long-running
-					service — it cannot run as a serverless function, because a Xero pull outlives the
-					timeout. Set <code>PUBLIC_API_BASE</code> to the worker's URL and redeploy.
-				</p>
-			</div>
-		{:else if supabaseConfigured}
+		{:else if supabaseConfigured && !session.accessToken}
+			<!-- Sign-in comes before any status message. Nothing about the
+			     deployment — not even which integrations are missing — is worth
+			     showing to someone who has not signed in. -->
 			<div class="signin">
 				<h1>Sign in</h1>
 				<p class="muted">This tool reaches company financial data. Accounts are issued by an
@@ -113,6 +114,27 @@
 					</button>
 				</form>
 				{#if authError}<p class="err">{authError}</p>{/if}
+			</div>
+		{:else if !workerConfigured}
+			<div class="signin">
+				<h1>No worker configured</h1>
+				<p class="muted">
+					The interface is deployed, but the workflow worker is a separate long-running
+					service — it cannot run as a serverless function, because a Xero pull outlives the
+					timeout. Set <code>PUBLIC_API_BASE</code> to the worker's URL and redeploy.
+				</p>
+			</div>
+		{:else if supabaseConfigured}
+			<!-- Signed in to Supabase, but the worker did not accept the session:
+			     a valid token with no org_members row. -->
+			<div class="signin">
+				<h1>No access</h1>
+				<p class="muted">
+					You are signed in as {session.email ?? 'this account'}, but it is not a member of
+					any organisation. Ask an administrator to add you.
+				</p>
+				{#if authError}<p class="err">{authError}</p>{/if}
+				<button onclick={leave}>Sign out</button>
 			</div>
 		{:else}
 			<div class="signin">
