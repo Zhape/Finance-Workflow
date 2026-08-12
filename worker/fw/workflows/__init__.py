@@ -1,16 +1,22 @@
 """Workflow registry.
 
 Adding a workflow means adding a module with SPEC/run/finalise and one line
-here.  The web app reads this registry to build the tile grid and the launch
+here. The web app reads this registry to build the tile grid and the launch
 forms, so no platform code changes.
+
+Workflows are platform-level, not per-org: every org sees every workflow. What
+differs per org is the data behind them -- its Xero connection, its vendor bank
+details, its bank-file layout. An org with no vendors imported will see the pay
+run tile and be told, on running it, that it has nothing to pay.
 """
 
 from types import ModuleType
 
-from . import weekly_payrun
+from . import overdue_chaseup, weekly_payrun
 
 REGISTRY: dict[str, ModuleType] = {
     weekly_payrun.SPEC.key: weekly_payrun,
+    overdue_chaseup.SPEC.key: overdue_chaseup,
 }
 
 

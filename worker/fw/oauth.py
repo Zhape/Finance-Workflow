@@ -1,11 +1,12 @@
 """Xero consent, server-side.
 
-One structural change from the desktop app: the Xero client_id/secret belong
-to the *platform*, not to each customer. In the desktop app Peter registered
-his own Xero app and pasted its credentials into Settings; that does not scale
-to customers, and asking a finance team to register a developer app would kill
-onboarding. Here there is a single Xero app, and each org grants it access to
-their own Xero organisation. Per-org data is the token, never the app.
+Which Xero application is used resolves org-first, platform-second. An org can
+register its own Xero app and enter the credentials in Settings; an org that
+does not rides the platform's, set by environment variable on the worker. That
+ordering matters for onboarding: nobody is *forced* through developer.xero.com,
+but an org that wants its own consent screen, its own revocation and its own
+rate limits can have one -- and one org's credentials are never visible to
+another, because every read goes through a store scoped by org_id.
 
 The PKCE verifier is held in `oauth_states` for the length of the round trip,
 so it never reaches the browser and cannot be replayed: `take()` consumes the
@@ -68,21 +69,39 @@ def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
-def _client() -> tuple[str, str, str]:
-    client_id = os.environ.get("FW_XERO_CLIENT_ID", "").strip()
-    secret = os.environ.get("FW_XERO_CLIENT_SECRET", "").strip()
-    redirect = os.environ.get(
+def redirect_uri() -> str:
+    return os.environ.get(
         "FW_XERO_REDIRECT_URI", "http://localhost:8000/api/connections/xero/callback"
     ).strip()
+
+
+def _client(org_id: str | None = None, apps=None) -> tuple[str, str, str]:
+    """Resolve the Xero application to use: the org's own, else the platform's.
+
+    The redirect URI is always the platform's, because it points at this
+    worker. An org registering its own Xero app still has to register this
+    same callback on it -- which is why the UI shows the URI next to the
+    credential fields rather than somewhere else.
+    """
+    client_id = secret = ""
+    if apps is not None and org_id:
+        found = apps.get(org_id)
+        if found:
+            client_id, secret = found
+
+    if not client_id:
+        client_id = os.environ.get("FW_XERO_CLIENT_ID", "").strip()
+        secret = os.environ.get("FW_XERO_CLIENT_SECRET", "").strip()
+
     if not client_id:
         raise OAuthError(
-            "FW_XERO_CLIENT_ID is not set — the platform's Xero app is not "
-            "configured."
+            "No Xero application is configured. Add your Client ID and secret "
+            "in Settings, or set FW_XERO_CLIENT_ID on the worker."
         )
-    return client_id, secret, redirect
+    return client_id, secret, redirect_uri()
 
 
-def setup_status() -> dict:
+def setup_status(org_id: str | None = None, apps=None) -> dict:
     """What the UI needs to talk someone through connecting Xero.
 
     The redirect URI is reported from the worker's own configuration rather
@@ -90,13 +109,16 @@ def setup_status() -> dict:
     byte for byte, so showing a value derived from anywhere else invites a
     mismatch that only appears at the end of the consent flow.
     """
-    client_id = os.environ.get("FW_XERO_CLIENT_ID", "").strip()
-    redirect = os.environ.get(
-        "FW_XERO_REDIRECT_URI", "http://localhost:8000/api/connections/xero/callback"
-    ).strip()
+    try:
+        client_id, _secret, redirect = _client(org_id, apps)
+        configured = True
+    except OAuthError:
+        client_id, redirect, configured = "", redirect_uri(), False
+    app = apps.status(org_id) if (apps is not None and org_id) else {"source": "platform"}
     return {
         "provider": "xero",
-        "appConfigured": bool(client_id),
+        "appConfigured": configured,
+        "app": app,
         "redirectUri": redirect,
         "scopes": os.environ.get("FW_XERO_SCOPES", DEFAULT_SCOPES).split(),
         # Never the client secret, and not the client id either: neither is
@@ -105,9 +127,9 @@ def setup_status() -> dict:
     }
 
 
-def start(state_store, org_id: str, name: str, user: str) -> str:
+def start(state_store, org_id: str, name: str, user: str, apps=None) -> str:
     """Create a PKCE challenge, stash the verifier, return the consent URL."""
-    client_id, _secret, redirect = _client()
+    client_id, _secret, redirect = _client(org_id, apps)
 
     verifier = _b64url(secrets.token_bytes(64))
     challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
@@ -131,8 +153,11 @@ def start(state_store, org_id: str, name: str, user: str) -> str:
     )
 
 
-def exchange(code: str, verifier: str) -> dict:
-    client_id, client_secret, redirect = _client()
+def exchange(code: str, verifier: str, org_id: str | None = None, apps=None) -> dict:
+    # Resolved again rather than carried through the round trip: the org cannot
+    # change between start and callback, and re-resolving avoids parking a
+    # client secret in the oauth_states row.
+    client_id, client_secret, redirect = _client(org_id, apps)
     data = {
         "grant_type": "authorization_code",
         "client_id": client_id,

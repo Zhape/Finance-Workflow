@@ -31,6 +31,7 @@ from .crypto import Cipher, EncryptionError
 from .db import create_db_engine, init_db
 from .stores import (
     ConnectionStore,
+    ProviderAppStore,
     LayoutStore,
     OAuthStateStore,
     OrgStore,
@@ -58,6 +59,10 @@ RUNS = RunStore(ENGINE)
 ORGS = OrgStore(ENGINE)
 STATES = OAuthStateStore(ENGINE)
 LAYOUTS = LayoutStore(ENGINE)
+
+
+def _apps() -> ProviderAppStore:
+    return ProviderAppStore(ENGINE, Cipher())
 
 
 def _connections() -> ConnectionStore:
@@ -147,14 +152,14 @@ def list_connections(principal: Principal = Depends(me)):
 @app.get("/api/connections/xero/setup")
 def xero_setup(principal: Principal = Depends(me)):
     """Configuration the Settings page needs to walk someone through connecting."""
-    return oauth.setup_status()
+    return oauth.setup_status(principal.org_id, _apps())
 
 
 @app.post("/api/connections/xero/start")
 def start_xero(name: str = "default", principal: Principal = Depends(me)):
     principal.require("admin")
     try:
-        url = oauth.start(STATES, principal.org_id, name, principal.email)
+        url = oauth.start(STATES, principal.org_id, name, principal.email, _apps())
     except oauth.OAuthError as exc:
         raise HTTPException(500, str(exc)) from None
     return {"url": url}
@@ -175,7 +180,7 @@ def xero_callback(code: str | None = None, state: str | None = None,
         return RedirectResponse(f"{WEB_ORIGIN}/settings?error=expired_state")
 
     try:
-        token = oauth.exchange(code, pending["verifier"])
+        token = oauth.exchange(code, pending["verifier"], pending["org_id"], _apps())
         found = oauth.tenants(token["access_token"])
         if not found:
             return RedirectResponse(f"{WEB_ORIGIN}/settings?error=no_organisations")
@@ -187,6 +192,41 @@ def xero_callback(code: str | None = None, state: str | None = None,
         return RedirectResponse(f"{WEB_ORIGIN}/settings?error=exchange_failed")
 
     return RedirectResponse(f"{WEB_ORIGIN}/settings?connected={pending['name']}")
+
+
+class XeroApp(BaseModel):
+    clientId: str
+    clientSecret: str
+    label: str | None = None
+
+
+@app.put("/api/connections/xero/app")
+def save_xero_app(body: XeroApp, principal: Principal = Depends(me)):
+    """Register this org's own Xero application."""
+    principal.require("admin")
+    if not body.clientId.strip() or not body.clientSecret.strip():
+        raise HTTPException(422, "Both the Client ID and the secret are required.")
+    _apps().save(principal.org_id, body.clientId, body.clientSecret,
+                 principal.email, body.label)
+    # Existing tokens were issued to the previous application and cannot be
+    # refreshed by the new one, so they are dropped rather than left to fail
+    # confusingly on the next run.
+    dropped = [c["name"] for c in _connections().list(principal.org_id)]
+    for name in dropped:
+        _connections().disconnect(principal.org_id, name)
+    return {"ok": True, "disconnected": dropped}
+
+
+@app.delete("/api/connections/xero/app")
+def clear_xero_app(principal: Principal = Depends(me)):
+    """Revert this org to the platform's Xero application."""
+    principal.require("admin")
+    if not _apps().clear(principal.org_id):
+        raise HTTPException(404, "This organisation has no Xero app of its own.")
+    dropped = [c["name"] for c in _connections().list(principal.org_id)]
+    for name in dropped:
+        _connections().disconnect(principal.org_id, name)
+    return {"ok": True, "disconnected": dropped}
 
 
 @app.delete("/api/connections/{name}")
@@ -240,8 +280,10 @@ def start_run(body: StartRun, principal: Principal = Depends(me)):
 
     ctx = RunContext(
         org_id=principal.org_id,
-        creds=XeroCredentials(principal.org_id, _connections(), log=lambda m: None),
-        bank_details=VendorStore(ENGINE, principal.org_id, region),
+        creds=XeroCredentials(principal.org_id, _connections(), log=lambda m: None,
+                              apps=_apps()),
+        # Only region-based workflows need vendor banking data.
+        bank_details=VendorStore(ENGINE, principal.org_id, region) if region else None,
         log=lambda m: None,
     )
 
@@ -281,13 +323,17 @@ def approve(run_id: str, body: Approve, principal: Principal = Depends(me)):
     if not chosen:
         raise HTTPException(422, "No rows selected.")
 
+    # A bank-file layout only applies to workflows that produce one. The
+    # chase-up has no region and no template; demanding a layout would block it.
     region = run["params"].get("region")
-    columns = LAYOUTS.get(principal.org_id, region)
-    if not columns:
-        raise HTTPException(
-            409,
-            f"No bank file layout configured for {region}. Import it in Settings.",
-        )
+    columns = []
+    if region:
+        columns = LAYOUTS.get(principal.org_id, region)
+        if not columns:
+            raise HTTPException(
+                409,
+                f"No bank file layout configured for {region}. Import it in Settings.",
+            )
 
     module = workflows.get(run["workflow"])
     ctx = RunContext(org_id=principal.org_id, creds=None, log=lambda m: None)

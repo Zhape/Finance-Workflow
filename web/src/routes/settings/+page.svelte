@@ -37,6 +37,14 @@
 	let copied = $state(false);
 	let showGuide = $state(false);
 
+	// The org's own Xero application. The secret is never sent back by the API,
+	// so the field is always blank on load: there is nothing to prefill, and a
+	// masked placeholder would only imply we could show it.
+	let clientId = $state('');
+	let clientSecret = $state('');
+	let appBusy = $state(false);
+	let appNotice = $state('');
+
 	const isAdmin = $derived(session.role === 'admin');
 	const notice = $derived($page.url.searchParams.get('connected'));
 	const callbackError = $derived($page.url.searchParams.get('error'));
@@ -76,6 +84,43 @@
 		} catch {
 			copied = false;
 		}
+	}
+
+	async function saveApp(event) {
+		event.preventDefault();
+		appBusy = true;
+		error = '';
+		appNotice = '';
+		try {
+			const res = await api.saveXeroApp(clientId.trim(), clientSecret, null);
+			clientSecret = '';
+			setup = await api.xeroSetup();
+			await refresh();
+			appNotice =
+				res.disconnected?.length > 0
+					? `Saved. ${res.disconnected.length} existing connection(s) were dropped — tokens issued by the previous app cannot be refreshed by this one, so reconnect below.`
+					: 'Saved. This organisation now connects through your own Xero app.';
+		} catch (e) {
+			error = e.message;
+		}
+		appBusy = false;
+	}
+
+	async function clearApp() {
+		appBusy = true;
+		error = '';
+		appNotice = '';
+		try {
+			await api.clearXeroApp();
+			clientId = '';
+			clientSecret = '';
+			setup = await api.xeroSetup();
+			await refresh();
+			appNotice = 'Reverted to the shared application.';
+		} catch (e) {
+			error = e.message;
+		}
+		appBusy = false;
 	}
 
 	async function connect(name) {
@@ -187,6 +232,64 @@
 		</ol>
 	{/if}
 </div>
+
+{#if setup}
+	<div class="app">
+		<div class="apphead">
+			<div>
+				<div class="name">Xero application</div>
+				<div class="meta">
+					{#if setup.app?.source === 'org'}
+						Using <strong>this organisation's own app</strong> · Client ID
+						<code>{setup.app.clientId}</code>
+						{#if setup.app.updatedBy}· set by {setup.app.updatedBy}{/if}
+					{:else}
+						Using the <strong>shared application</strong> provided by this deployment.
+						Enter your own Client ID and secret below to use a Xero app you control.
+					{/if}
+				</div>
+			</div>
+			{#if setup.app?.source === 'org' && isAdmin}
+				<button class="ghost" disabled={appBusy} onclick={clearApp}>Use shared app</button>
+			{/if}
+		</div>
+
+		{#if appNotice}<div class="banner ok inner">{appNotice}</div>{/if}
+
+		{#if isAdmin}
+			<form class="appform" onsubmit={saveApp}>
+				<label for="clientId">Client ID</label>
+				<input
+					id="clientId"
+					type="text"
+					autocomplete="off"
+					spellcheck="false"
+					bind:value={clientId}
+					placeholder={setup.app?.clientId ?? 'From your Xero app'}
+					required
+				/>
+
+				<label for="clientSecret">Client secret</label>
+				<input
+					id="clientSecret"
+					type="password"
+					autocomplete="new-password"
+					bind:value={clientSecret}
+					placeholder={setup.app?.source === 'org' ? 'Enter again to replace' : 'Shown once by Xero'}
+					required
+				/>
+
+				<button type="submit" disabled={appBusy}>
+					{appBusy ? 'Saving…' : setup.app?.source === 'org' ? 'Replace credentials' : 'Use my own Xero app'}
+				</button>
+				<p class="help">
+					Encrypted before storage and never shown back — not even to you. Only members of
+					this organisation are affected; other organisations keep their own.
+				</p>
+			</form>
+		{/if}
+	</div>
+{/if}
 
 <div class="rows">
 	{#each SLOTS as slot (slot.name)}
@@ -345,6 +448,53 @@
 		padding-left: 18px;
 	}
 
+	.app {
+		background: var(--card);
+		border: 1px solid var(--line);
+		border-radius: 10px;
+		margin-bottom: 14px;
+		padding: 16px;
+	}
+	.apphead {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: 16px;
+	}
+	.banner.inner {
+		margin: 12px 0 0;
+	}
+	.appform {
+		display: grid;
+		gap: 6px;
+		margin-top: 14px;
+		max-width: 420px;
+	}
+	.appform label {
+		font-size: 0.8rem;
+		font-weight: 600;
+	}
+	.appform input {
+		padding: 8px 10px;
+		border: 1px solid var(--line);
+		border-radius: 6px;
+		font: inherit;
+		font-size: 0.85rem;
+		box-sizing: border-box;
+	}
+	.appform label + input {
+		margin-bottom: 8px;
+	}
+	.appform button {
+		justify-self: start;
+		margin-top: 4px;
+	}
+	.help {
+		font-size: 0.78rem;
+		color: var(--muted);
+		margin: 8px 0 0;
+		line-height: 1.5;
+	}
 	.rows {
 		background: var(--card);
 		border: 1px solid var(--line);

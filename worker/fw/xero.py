@@ -71,12 +71,15 @@ class FileTokenStore:
 class XeroCredentials:
     """Implements the CredentialProvider protocol for Xero."""
 
-    def __init__(self, org_id: str, store: TokenStore, log=print):
-        # The Xero app is the platform's, shared by every org; only the token
-        # is per-org. See oauth.py for why.
+    def __init__(self, org_id: str, store: TokenStore, log=print, apps=None):
+        # `apps` is the per-org application store. Refresh must use the same
+        # client the token was issued to, so it resolves through oauth._client
+        # exactly as the consent flow did -- using a different client id here
+        # would make every refresh fail once an org registers its own app.
         self._org_id = org_id
         self._store = store
         self._log = log
+        self._apps = apps
 
     def xero(self, connection: str = "default") -> tuple[str, str]:
         token = self._store.load(self._org_id, connection)
@@ -100,12 +103,12 @@ class XeroCredentials:
         return token["access_token"], tenant_id
 
     def _refresh(self, connection: str, token: dict) -> dict:
-        import os
+        from .oauth import OAuthError, _client
 
-        client_id = os.environ.get("FW_XERO_CLIENT_ID", "").strip()
-        client_secret = os.environ.get("FW_XERO_CLIENT_SECRET", "").strip()
-        if not client_id:
-            raise XeroError("FW_XERO_CLIENT_ID is not set on the worker.")
+        try:
+            client_id, client_secret, _redirect = _client(self._org_id, self._apps)
+        except OAuthError as exc:
+            raise XeroError(str(exc)) from None
 
         self._log(f"[xero] refreshing {connection} token")
         data = {
@@ -185,6 +188,32 @@ class XeroClient:
                 break
             page += 1
         return bills
+
+    def get_receivables(self) -> list[dict[str, Any]]:
+        """All unpaid Accounts Receivable invoices — what customers owe.
+
+        Same pagination as bills, opposite direction: ACCREC rather than ACCPAY.
+        AUTHORISED means approved and awaiting payment; anything fully paid
+        drops out because Xero reports AmountDue of zero, which the caller
+        filters.
+        """
+        invoices: list[dict] = []
+        page = 1
+        while True:
+            batch = self._get(
+                "Invoices",
+                {
+                    "Type": "ACCREC",
+                    "Statuses": "AUTHORISED",
+                    "page": page,
+                    "summaryOnly": "false",
+                },
+            ).get("Invoices", [])
+            invoices.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return invoices
 
     def _get(self, resource: str, params: dict | None = None) -> dict[str, Any]:
         url = f"{API_BASE}/{resource}"

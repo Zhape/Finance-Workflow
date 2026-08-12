@@ -88,6 +88,21 @@ connections = Table(
     UniqueConstraint("org_id", "provider", "name", name="connections_org_id_provider_name_key"),
 )
 
+# A per-org OAuth application. Overrides the platform default from the
+# environment, so an org can bring its own Xero registration.
+provider_apps = Table(
+    "provider_apps", metadata,
+    Column("org_id", _Id, ForeignKey("orgs.id", ondelete="CASCADE"),
+           primary_key=True),
+    Column("provider", Text, primary_key=True),
+    Column("client_id", Text, nullable=False),
+    Column("secret", LargeBinary, nullable=False),
+    Column("key_id", Text, nullable=False),
+    Column("label", Text),
+    Column("updated_by", Text),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
+)
+
 oauth_states = Table(
     "oauth_states", metadata,
     Column("state", String(64), primary_key=True),

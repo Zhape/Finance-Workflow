@@ -79,6 +79,9 @@ export const api = {
 	run: (id, fetcher = fetch) => get(`/api/runs/${id}`, fetcher),
 	connections: (fetcher = fetch) => get('/api/connections', fetcher),
 	xeroSetup: (fetcher = fetch) => get('/api/connections/xero/setup', fetcher),
+	saveXeroApp: (clientId, clientSecret, label) =>
+		send('/api/connections/xero/app', 'PUT', { clientId, clientSecret, label }),
+	clearXeroApp: () => send('/api/connections/xero/app', 'DELETE'),
 
 	start: (workflow, params) => send('/api/runs', 'POST', { workflow, params }),
 	approve: (id, rowIds) => send(`/api/runs/${id}/approve`, 'POST', { rowIds }),

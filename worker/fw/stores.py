@@ -21,6 +21,7 @@ from sqlalchemy import delete, insert, select, update
 from .banking import norm_header, norm_vendor, normalise_account
 from .crypto import Cipher
 from .db import (
+    provider_apps,
     bank_layouts,
     connections,
     oauth_states,
@@ -160,6 +161,90 @@ class ConnectionStore:
                 .where(connections.c.org_id == org_id)
                 .where(connections.c.provider == self._provider)
                 .where(connections.c.name == connection)
+            )
+        return result.rowcount > 0
+
+
+class ProviderAppStore:
+    """The OAuth application an org connects through.
+
+    Resolution is org row first, platform environment second. That ordering is
+    the whole design: most orgs never register an app and ride the platform's,
+    while an org that insists on its own gets it without a code change.
+    """
+
+    def __init__(self, engine, cipher: Cipher | None = None,
+                 provider: str = "xero"):
+        self._engine = engine
+        self._cipher = cipher or Cipher()
+        self._provider = provider
+
+    def get(self, org_id: str) -> tuple[str, str] | None:
+        """Return (client_id, client_secret) for this org, or None to fall back."""
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(provider_apps.c.client_id, provider_apps.c.secret)
+                .where(provider_apps.c.org_id == org_id)
+                .where(provider_apps.c.provider == self._provider)
+            ).first()
+        if row is None:
+            return None
+        return row.client_id, self._cipher.decrypt(row.secret)
+
+    def status(self, org_id: str) -> dict[str, Any]:
+        """Metadata for the UI. Returns the client id, never the secret."""
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(provider_apps.c.client_id, provider_apps.c.label,
+                       provider_apps.c.updated_by, provider_apps.c.updated_at)
+                .where(provider_apps.c.org_id == org_id)
+                .where(provider_apps.c.provider == self._provider)
+            ).first()
+        if row is None:
+            return {"source": "platform", "clientId": None}
+        return {
+            "source": "org",
+            "clientId": row.client_id,
+            "label": row.label,
+            "updatedBy": row.updated_by,
+            "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+        }
+
+    def save(self, org_id: str, client_id: str, client_secret: str,
+             user: str, label: str | None = None) -> None:
+        values = {
+            "client_id": client_id.strip(),
+            "secret": self._cipher.encrypt(client_secret),
+            "key_id": self._cipher.key_id,
+            "label": label,
+            "updated_by": user,
+            "updated_at": _now(),
+        }
+        with self._engine.begin() as conn:
+            existing = conn.execute(
+                select(provider_apps.c.org_id)
+                .where(provider_apps.c.org_id == org_id)
+                .where(provider_apps.c.provider == self._provider)
+            ).first()
+            if existing:
+                conn.execute(
+                    update(provider_apps)
+                    .where(provider_apps.c.org_id == org_id)
+                    .where(provider_apps.c.provider == self._provider)
+                    .values(**values)
+                )
+            else:
+                conn.execute(insert(provider_apps).values(
+                    org_id=org_id, provider=self._provider, **values
+                ))
+
+    def clear(self, org_id: str) -> bool:
+        """Revert this org to the platform application."""
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                delete(provider_apps)
+                .where(provider_apps.c.org_id == org_id)
+                .where(provider_apps.c.provider == self._provider)
             )
         return result.rowcount > 0
 
