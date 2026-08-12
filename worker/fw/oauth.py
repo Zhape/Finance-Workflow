@@ -33,14 +33,30 @@ CONNECTIONS_URL = "https://api.xero.com/connections"
 # requesting one returns invalid_scope before the consent screen appears.
 # Scopes for contacts, settings, attachments and budgets were unchanged.
 #
-# This workflow reads Accounts Payable bills, which live under the Invoices
-# endpoint, so `accounting.invoices.read` is the replacement. Contacts stays
-# because vendor name and email are matched from the bill's contact. Nothing
-# here grants write access: every scope is `.read`, and the platform has no
-# code that writes to Xero.
+# This set is deliberately broad, so that workflows beyond the pay run can be
+# added without sending every org back through consent. Note what that means:
+# the scopes below WITHOUT a `.read` suffix grant write access to Xero. No code
+# in this platform writes to Xero today, and the pay run still cannot move
+# money -- it produces a file for the bank. But the permission now exists, so
+# "the app is read-only" stopped being true at the token level and the consent
+# screen will say so.
+#
+# Deliberately excluded:
+#   accounting.journals.read  -- needs Xero's Advanced tier plus certification;
+#                                requesting it without those fails the consent.
+#   accounting.reports.*      -- the broad reports scope was replaced by
+#                                per-report scopes; add the specific one when a
+#                                workflow actually needs a report.
+#   payroll / projects / assets / files -- separate APIs, separate scopes; add
+#                                when a workflow needs them.
+#
+# Override per deployment with FW_XERO_SCOPES (space separated).
 DEFAULT_SCOPES = (
     "openid profile email offline_access "
-    "accounting.invoices.read accounting.contacts.read"
+    "accounting.contacts accounting.settings accounting.attachments "
+    "accounting.invoices accounting.payments "
+    "accounting.banktransactions accounting.manualjournals "
+    "accounting.budgets.read"
 )
 
 

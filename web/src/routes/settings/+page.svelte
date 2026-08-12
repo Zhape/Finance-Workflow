@@ -167,9 +167,11 @@
 			<li>
 				<strong>Come back and press Connect</strong>
 				<p>
-					Xero will ask which organisation to grant access to, then return you here. Access is
-					read-only: this app can read bills and contacts, and cannot make payments or change
-					anything in Xero.
+					Xero will ask which organisation to grant access to, then return you here. The
+					consent screen lists read <em>and</em> write permissions across accounting — granted
+					up front so later workflows don't send everyone back through consent. Nothing in
+					this app writes to Xero today, and pay runs can't move money: they produce a file
+					you upload to the bank yourself.
 				</p>
 				{#if setup?.scopes?.length}
 					<details class="scopes">
