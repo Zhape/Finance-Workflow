@@ -16,11 +16,14 @@
 export const SUPABASE_URL = 'https://zacgedjltfkiyfydghtp.supabase.co';
 export const SUPABASE_ANON_KEY = 'sb_publishable_9YgapTPLHUm-tVbPwq2AcA_JpMgf-66';
 
-/** Where the worker lives.
+/** Where the worker lives — deliberately empty, i.e. same origin.
  *
- * Empty means same-origin, which is what dev wants: Vite proxies /api to
- * localhost:8000. In production set this to the worker's URL — it cannot be a
- * Vercel function, because a Xero pull outlives the timeout — and make sure
- * the worker's FW_WEB_ORIGIN allows this app's origin.
+ * In dev, Vite proxies /api to localhost:8000. In production, Render's static
+ * site rewrites /api/* to the worker service. Both are same-origin from the
+ * browser's point of view, so there is no CORS to configure, no cross-origin
+ * auth header handling, and no per-environment value to keep in step.
+ *
+ * Only set this if the web app is ever served from a different host to the
+ * worker — in which case the worker's FW_WEB_ORIGIN must allow that origin.
  */
 export const API_BASE = '';

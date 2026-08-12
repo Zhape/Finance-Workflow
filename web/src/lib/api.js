@@ -10,7 +10,6 @@ import { API_BASE as CONFIGURED_API_BASE } from './config.js';
 import { refreshSession, session } from './session.svelte.js';
 
 export const API_BASE = CONFIGURED_API_BASE.replace(/\/$/, '');
-export const workerConfigured = Boolean(API_BASE) || !import.meta.env.PROD;
 
 const url = (path) => `${API_BASE}${path}`;
 
@@ -31,6 +30,17 @@ async function json(res) {
 		}
 		const error = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
 		error.status = res.status;
+		throw error;
+	}
+
+	// A 200 that isn't JSON means the request never reached the worker — the
+	// SPA catch-all answered it with index.html. Say that, rather than letting
+	// a raw "Unexpected token '<'" reach someone who cannot act on it.
+	if (!(res.headers.get('content-type') || '').includes('json')) {
+		const error = new Error(
+			'The API returned a page instead of data — the /api route is not reaching the worker.'
+		);
+		error.status = 502;
 		throw error;
 	}
 	return res.json();
