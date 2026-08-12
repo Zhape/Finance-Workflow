@@ -138,3 +138,47 @@ def test_one_org_cannot_resolve_anothers_app(engine, two_orgs, apps, monkeypatch
 
     client_id, _secret, _r = oauth._client(globex, apps)
     assert client_id == "PLATFORM"
+
+
+# ---------------------------------------------------------------------------
+# Providers are independent
+# ---------------------------------------------------------------------------
+
+def test_xero_and_google_apps_are_separate_for_the_same_org(engine, two_orgs):
+    """One org, two providers, two applications. Registering a Google client
+    must not disturb the Xero one -- they are different rows, and conflating
+    them would silently break Xero the moment someone connected Gmail."""
+    from fw.crypto import Cipher, generate_key
+    from fw.stores import ProviderAppStore
+
+    acme, _ = two_orgs
+    key = generate_key()
+    xero = ProviderAppStore(engine, Cipher(key=key), provider="xero")
+    google = ProviderAppStore(engine, Cipher(key=key), provider="google")
+
+    xero.save(acme, "XERO-CLIENT", "xero-secret", "alice@acme.test")
+    google.save(acme, "GOOGLE-CLIENT", "google-secret", "alice@acme.test")
+
+    assert xero.get(acme) == ("XERO-CLIENT", "xero-secret")
+    assert google.get(acme) == ("GOOGLE-CLIENT", "google-secret")
+
+    # Reverting one provider leaves the other untouched.
+    assert google.clear(acme) is True
+    assert google.get(acme) is None
+    assert xero.get(acme) == ("XERO-CLIENT", "xero-secret")
+
+
+def test_google_app_resolution_falls_back_to_the_platform(engine, two_orgs,
+                                                          monkeypatch):
+    from fw import google as g
+    from fw.crypto import Cipher, generate_key
+    from fw.stores import ProviderAppStore
+
+    acme, globex = two_orgs
+    apps = ProviderAppStore(engine, Cipher(key=generate_key()), provider="google")
+    monkeypatch.setenv("FW_GOOGLE_CLIENT_ID", "PLATFORM-GOOGLE")
+    monkeypatch.setenv("FW_GOOGLE_CLIENT_SECRET", "platform-secret")
+    apps.save(acme, "ACME-GOOGLE", "acme-secret", "alice@acme.test")
+
+    assert g._client(acme, apps)[0] == "ACME-GOOGLE"
+    assert g._client(globex, apps)[0] == "PLATFORM-GOOGLE"

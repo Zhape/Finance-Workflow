@@ -65,16 +65,31 @@ ACCESS = WorkflowAccessStore(ENGINE)
 TEMPLATES = TemplateStore(ENGINE)
 
 
+# Providers whose OAuth application an org may bring its own of. Keyed by the
+# same string used in `connections.provider` and `provider_apps.provider`.
+PROVIDERS = ("xero", "google")
+
+
+def _apps_for(provider: str) -> ProviderAppStore:
+    if provider not in PROVIDERS:
+        raise HTTPException(404, f"Unknown provider {provider!r}")
+    return ProviderAppStore(ENGINE, Cipher(), provider=provider)
+
+
+def _connections_for(provider: str) -> ConnectionStore:
+    return ConnectionStore(ENGINE, Cipher(), provider=provider)
+
+
 def _apps() -> ProviderAppStore:
     return ProviderAppStore(ENGINE, Cipher())
 
 
 def _google_apps() -> ProviderAppStore:
-    return ProviderAppStore(ENGINE, Cipher(), provider=google.PROVIDER)
+    return _apps_for(google.PROVIDER)
 
 
 def _google_connections() -> ConnectionStore:
-    return ConnectionStore(ENGINE, Cipher(), provider=google.PROVIDER)
+    return _connections_for(google.PROVIDER)
 
 
 def _mailer(org_id: str):
@@ -262,39 +277,52 @@ def xero_callback(code: str | None = None, state: str | None = None,
     return RedirectResponse(f"{WEB_ORIGIN}/settings?connected={pending['name']}")
 
 
-class XeroApp(BaseModel):
+class ProviderApp(BaseModel):
     clientId: str
     clientSecret: str
     label: str | None = None
 
 
-@app.put("/api/connections/xero/app")
-def save_xero_app(body: XeroApp, principal: Principal = Depends(me)):
-    """Register this org's own Xero application."""
+XeroApp = ProviderApp  # the model is provider-agnostic; name kept for clarity
+
+
+def _drop_connections(provider: str, org_id: str) -> list[str]:
+    """Forget an org's tokens for a provider.
+
+    Called whenever the application changes. A refresh token is bound to the
+    client that issued it, so a token kept across an app change fails with
+    `invalid_grant` at the least convenient moment -- mid run, rather than at
+    the moment someone deliberately changed the setting.
+    """
+    store = _connections_for(provider)
+    dropped = [c["name"] for c in store.list(org_id)]
+    for name in dropped:
+        store.disconnect(org_id, name)
+    return dropped
+
+
+@app.put("/api/connections/{provider}/app")
+def save_provider_app(provider: str, body: XeroApp,
+                      principal: Principal = Depends(me)):
+    """Register this org's own OAuth application for a provider."""
     principal.require("admin")
+    apps = _apps_for(provider)
     if not body.clientId.strip() or not body.clientSecret.strip():
         raise HTTPException(422, "Both the Client ID and the secret are required.")
-    _apps().save(principal.org_id, body.clientId, body.clientSecret,
-                 principal.email, body.label)
-    # Existing tokens were issued to the previous application and cannot be
-    # refreshed by the new one, so they are dropped rather than left to fail
-    # confusingly on the next run.
-    dropped = [c["name"] for c in _connections().list(principal.org_id)]
-    for name in dropped:
-        _connections().disconnect(principal.org_id, name)
-    return {"ok": True, "disconnected": dropped}
+    apps.save(principal.org_id, body.clientId, body.clientSecret,
+              principal.email, body.label)
+    return {"ok": True, "disconnected": _drop_connections(provider, principal.org_id)}
 
 
-@app.delete("/api/connections/xero/app")
-def clear_xero_app(principal: Principal = Depends(me)):
-    """Revert this org to the platform's Xero application."""
+@app.delete("/api/connections/{provider}/app")
+def clear_provider_app(provider: str, principal: Principal = Depends(me)):
+    """Revert this org to the platform's application for a provider."""
     principal.require("admin")
-    if not _apps().clear(principal.org_id):
-        raise HTTPException(404, "This organisation has no Xero app of its own.")
-    dropped = [c["name"] for c in _connections().list(principal.org_id)]
-    for name in dropped:
-        _connections().disconnect(principal.org_id, name)
-    return {"ok": True, "disconnected": dropped}
+    if not _apps_for(provider).clear(principal.org_id):
+        raise HTTPException(
+            404, f"This organisation has no {provider} app of its own."
+        )
+    return {"ok": True, "disconnected": _drop_connections(provider, principal.org_id)}
 
 
 @app.get("/api/connections/google/setup")

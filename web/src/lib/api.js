@@ -79,9 +79,15 @@ export const api = {
 	run: (id, fetcher = fetch) => get(`/api/runs/${id}`, fetcher),
 	connections: (fetcher = fetch) => get('/api/connections', fetcher),
 	xeroSetup: (fetcher = fetch) => get('/api/connections/xero/setup', fetcher),
-	saveXeroApp: (clientId, clientSecret, label) =>
-		send('/api/connections/xero/app', 'PUT', { clientId, clientSecret, label }),
-	clearXeroApp: () => send('/api/connections/xero/app', 'DELETE'),
+	// Provider-agnostic: 'xero' or 'google'. The worker rejects anything else.
+	saveProviderApp: (provider, clientId, clientSecret, label = null) =>
+		send(`/api/connections/${encodeURIComponent(provider)}/app`, 'PUT', {
+			clientId,
+			clientSecret,
+			label
+		}),
+	clearProviderApp: (provider) =>
+		send(`/api/connections/${encodeURIComponent(provider)}/app`, 'DELETE'),
 
 	googleSetup: (fetcher = fetch) => get('/api/connections/google/setup', fetcher),
 	connectGoogle: () => send('/api/connections/google/start', 'POST'),
