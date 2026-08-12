@@ -190,6 +190,15 @@ def access_token(org_id: str, store, apps=None, connection: str = "default",
     """
     token = store.load(org_id, connection)
     if not token or not token.get("refresh_token"):
+        # Two different Gmail connections exist, connected from two different
+        # screens. Naming the wrong one sends someone to a page that cannot
+        # fix their problem, so the message follows the connection.
+        if connection.startswith(INBOX_PREFIX):
+            mailbox = connection[len(INBOX_PREFIX):]
+            raise GoogleError(
+                f"No stored credentials for {mailbox}. Reconnect that mailbox "
+                f"on the Invoice Inbox screen."
+            )
         raise GoogleError(
             "Gmail is not connected for this organisation. Connect it in "
             "Settings."

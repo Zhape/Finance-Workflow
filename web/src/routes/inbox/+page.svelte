@@ -106,6 +106,19 @@
 		}
 	}
 
+	async function removeMailbox(mailbox) {
+		if (!confirm(`Stop reading ${mailbox.address}? Mail already ingested from it is removed too.`))
+			return;
+		try {
+			await api.removeMailbox(mailbox.id);
+			status = await api.inboxStatus();
+			await refreshList();
+			notice = `${mailbox.address} disconnected.`;
+		} catch (e) {
+			error = e.message;
+		}
+	}
+
 	async function changeCategory(event) {
 		const key = event.currentTarget.value;
 		busy = true;
@@ -189,10 +202,15 @@
 	</div>
 	<div class="actions">
 		<a class="ghost" href="/inbox/templates">Templates</a>
+		<!-- Always offered, not only when nothing is connected. Several
+		     mailboxes per organisation is the normal case — one per person,
+		     plus whatever a Google Group delivers — and hiding this once the
+		     first one was added made the second one impossible. -->
+		<button class="ghost" onclick={connectMailbox}>
+			{connected ? 'Add a mailbox' : 'Connect a mailbox'}
+		</button>
 		{#if connected}
 			<button onclick={sync} disabled={syncing}>{syncing ? 'Syncing…' : 'Sync now'}</button>
-		{:else}
-			<button onclick={connectMailbox}>Connect a mailbox</button>
 		{/if}
 	</div>
 </div>
@@ -243,6 +261,29 @@
 
 	{#if notice}<p class="banner ok">{notice}</p>{/if}
 	{#if error}<p class="banner err">{error}</p>{/if}
+
+	{#if connected}
+		<!-- Which mailboxes this screen is actually reading, and whether each
+		     one still works. Without this, a mailbox whose token has been
+		     revoked looks identical to a quiet week. -->
+		<div class="mailboxes">
+			<span class="label">Reading</span>
+			{#each mailboxes as mailbox (mailbox.id)}
+				<span class="mailbox" class:bad={mailbox.status !== 'ok'}>
+					{mailbox.address}
+					{#if mailbox.status !== 'ok'}
+						<span title={mailbox.lastError}>· needs reconnecting</span>
+					{/if}
+					<button class="x" onclick={() => removeMailbox(mailbox)} title="Remove">×</button>
+				</span>
+			{/each}
+			{#if status?.xero?.connected}
+				<span class="mailbox xero">Xero: {status.xero.tenantName || status.xero.connection}</span>
+			{:else}
+				<span class="mailbox bad">Xero not connected — invoices cannot be checked</span>
+			{/if}
+		</div>
+	{/if}
 
 	{#if !connected}
 		<div class="box">
@@ -583,6 +624,52 @@
 	.banner ul {
 		margin: 6px 0 0;
 		padding-left: 18px;
+	}
+
+	.mailboxes {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+		margin-bottom: 14px;
+		font-size: 0.8rem;
+	}
+	.mailboxes .label {
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		font-size: 0.7rem;
+		color: var(--muted);
+	}
+	.mailbox {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		background: var(--card);
+		border: 1px solid var(--line);
+		border-radius: 999px;
+		padding: 3px 6px 3px 12px;
+		color: var(--muted);
+	}
+	.mailbox.xero {
+		padding-right: 12px;
+	}
+	.mailbox.bad {
+		border-color: var(--danger);
+		color: var(--danger);
+		padding-right: 12px;
+	}
+	.x {
+		background: none;
+		border: none;
+		color: var(--muted);
+		cursor: pointer;
+		font-size: 1rem;
+		line-height: 1;
+		padding: 0 4px;
+		border-radius: 999px;
+	}
+	.x:hover {
+		color: var(--danger);
 	}
 
 	.split {
