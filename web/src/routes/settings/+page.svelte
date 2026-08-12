@@ -339,10 +339,7 @@
 						Disconnect
 					</button>
 				{:else}
-					<button
-						disabled={!isAdmin || gmailBusy || !gmail.appConfigured}
-						onclick={connectGmail}
-					>
+					<button disabled={!isAdmin || gmailBusy} onclick={connectGmail}>
 						{gmailBusy ? 'Opening Google…' : 'Connect Gmail'}
 					</button>
 				{/if}

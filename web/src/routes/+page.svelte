@@ -32,6 +32,13 @@
 			</span>
 		</a>
 	{/each}
+	<a class="tile request" href="/requests">
+		<span class="icon" aria-hidden="true">+</span>
+		<span class="name">Request a workflow</span>
+		<span class="desc">
+			Describe a manual process and it becomes a proposal for the platform to build.
+		</span>
+	</a>
 </div>
 
 <h2>Recent runs</h2>
@@ -92,6 +99,14 @@
 	}
 	.tile:hover {
 		border-color: var(--accent);
+	}
+	.tile.request {
+		border-style: dashed;
+		background: none;
+	}
+	.tile.request .icon {
+		background: #eef1f5;
+		color: var(--muted);
 	}
 	.icon {
 		width: 34px;

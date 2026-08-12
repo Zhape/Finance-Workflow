@@ -124,6 +124,10 @@ database, so a green health check proves the worker reached Supabase.
 | `SUPABASE_URL` or `FW_SUPABASE_JWT_SECRET` | Enables real JWT verification. |
 | `FW_DEV_USER` / `FW_DEV_USER_ID` | Dev-only principal. Refuses to work unless `FW_ENV=dev`. |
 | `PUBLIC_SUPABASE_URL` / `PUBLIC_SUPABASE_ANON_KEY` | Web app sign-in. Unset = dev mode. |
+| `FW_GOOGLE_CLIENT_ID` / `_SECRET` | The platform's Google app (Gmail drafting). Orgs may override in Settings. |
+| `FW_GOOGLE_REDIRECT_URI` | Must be registered on the Google client. |
+| `FW_GITHUB_TOKEN` / `FW_GITHUB_REPO` | Lets "Request a workflow" open pull requests on this repo. |
+| `FW_ANTHROPIC_API_KEY` / `FW_ANTHROPIC_MODEL` | Optional: attaches a generated draft module to request PRs. |
 
 The Xero app belongs to the platform, not to each customer. In the desktop app
 Peter registered his own Xero app and pasted its credentials into Settings;

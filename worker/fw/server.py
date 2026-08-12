@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel
 
-from . import env, google, oauth, workflows
+from . import env, google, oauth, requests_pr, workflows
 
 env.load()  # before anything reads os.environ
 
@@ -39,6 +39,7 @@ from .stores import (
     TemplateStore,
     VendorStore,
     WorkflowAccessStore,
+    WorkflowRequestStore,
 )
 from .xero import XeroCredentials, XeroError
 
@@ -63,6 +64,7 @@ STATES = OAuthStateStore(ENGINE)
 LAYOUTS = LayoutStore(ENGINE)
 ACCESS = WorkflowAccessStore(ENGINE)
 TEMPLATES = TemplateStore(ENGINE)
+REQUESTS = WorkflowRequestStore(ENGINE)
 
 
 # Providers whose OAuth application an org may bring its own of. Keyed by the
@@ -452,6 +454,66 @@ def reset_template(key: str, variant: str, principal: Principal = Depends(me)):
     if not TEMPLATES.reset(principal.org_id, key, variant):
         raise HTTPException(404, "That template is not customised.")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Workflow requests — approach 4: describe it, get a pull request
+# ---------------------------------------------------------------------------
+
+class WorkflowRequest(BaseModel):
+    title: str
+    description: str
+
+
+@app.get("/api/workflow-requests")
+def list_workflow_requests(principal: Principal = Depends(me)):
+    from . import github
+
+    return {
+        "requests": REQUESTS.list(principal.org_id),
+        # Configuration state, so the form can say up front what will happen
+        # rather than failing after someone has written three paragraphs.
+        "configured": github.configured(),
+        "generation": requests_pr.generation_configured(),
+    }
+
+
+@app.post("/api/workflow-requests")
+def create_workflow_request(body: WorkflowRequest,
+                            principal: Principal = Depends(me)):
+    principal.require("member")
+    title = body.title.strip()
+    description = body.description.strip()
+    if not title or len(title) > 120:
+        raise HTTPException(422, "A title is required, at most 120 characters.")
+    if len(description) < 30:
+        raise HTTPException(
+            422, "Describe the workflow in at least a sentence or two — the "
+                 "person building it has only this text to go on.")
+    if len(description) > 8000:
+        raise HTTPException(422, "The description is too long (8000 chars max).")
+
+    request_id = REQUESTS.create(principal.org_id, title, description,
+                                 principal.email)
+    try:
+        # Blocking on purpose, same as runs: generation plus the GitHub round
+        # trips take up to a couple of minutes, and the requester should leave
+        # this page knowing whether a PR exists, not wondering.
+        outcome = POOL.submit(
+            requests_pr.open_request_pr,
+            title, description, principal.org_name, principal.email, request_id,
+        ).result()
+        REQUESTS.resolve(principal.org_id, request_id,
+                         pr_url=outcome["pr_url"], kind=outcome["kind"],
+                         error=None)
+    except Exception as exc:  # noqa: BLE001 — the row carries the reason
+        REQUESTS.resolve(principal.org_id, request_id,
+                         pr_url=None, kind=None, error=str(exc)[:500])
+
+    for r in REQUESTS.list(principal.org_id):
+        if r["id"] == request_id:
+            return r
+    raise HTTPException(500, "The request was not recorded.")
 
 
 @app.delete("/api/connections/{name}")

@@ -22,6 +22,7 @@ from .banking import norm_header, norm_vendor, normalise_account
 from .crypto import Cipher
 from .db import (
     org_workflows,
+    workflow_requests,
     workflow_templates,
     provider_apps,
     bank_layouts,
@@ -253,6 +254,60 @@ class TemplateStore:
             stmt = stmt.where(workflow_templates.c.variant == variant)
         with self._engine.begin() as conn:
             return conn.execute(stmt).rowcount
+
+
+class WorkflowRequestStore:
+    """Requests for workflows that do not exist yet, and what became of them."""
+
+    def __init__(self, engine):
+        self._engine = engine
+
+    def create(self, org_id: str, title: str, description: str,
+               user: str) -> str:
+        request_id = _uuid()
+        with self._engine.begin() as conn:
+            conn.execute(insert(workflow_requests).values(
+                id=request_id, org_id=org_id, title=title,
+                description=description, status="submitted",
+                requested_by=user, created_at=_now(),
+            ))
+        return request_id
+
+    def resolve(self, org_id: str, request_id: str, *, pr_url: str | None,
+                kind: str | None, error: str | None) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(
+                update(workflow_requests)
+                .where(workflow_requests.c.id == request_id)
+                .where(workflow_requests.c.org_id == org_id)
+                .values(
+                    status="failed" if error else "pr_opened",
+                    pr_url=pr_url, kind=kind, error=error,
+                )
+            )
+
+    def list(self, org_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(workflow_requests)
+                .where(workflow_requests.c.org_id == org_id)
+                .order_by(workflow_requests.c.created_at.desc())
+                .limit(limit)
+            ).all()
+        return [
+            {
+                "id": str(r.id),
+                "title": r.title,
+                "description": r.description,
+                "status": r.status,
+                "kind": r.kind,
+                "prUrl": r.pr_url,
+                "error": r.error,
+                "requestedBy": r.requested_by,
+                "createdAt": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
 
 
 class WorkflowAccessStore:

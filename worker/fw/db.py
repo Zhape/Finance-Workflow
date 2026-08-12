@@ -163,6 +163,23 @@ workflow_templates = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now()),
 )
 
+# A user's request for a workflow that does not exist yet. The worker turns
+# these into pull requests; code review and merge stay the trust boundary.
+workflow_requests = Table(
+    "workflow_requests", metadata,
+    Column("id", _Id, primary_key=True),
+    Column("org_id", _Id, ForeignKey("orgs.id", ondelete="CASCADE"),
+           nullable=False),
+    Column("title", Text, nullable=False),
+    Column("description", Text, nullable=False),
+    Column("status", Text, nullable=False, server_default="submitted"),
+    Column("kind", Text),
+    Column("pr_url", Text),
+    Column("error", Text),
+    Column("requested_by", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
 runs = Table(
     "runs", metadata,
     Column("id", _Id, primary_key=True),

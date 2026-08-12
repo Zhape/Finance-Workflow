@@ -107,6 +107,10 @@ export const api = {
 			'DELETE'
 		),
 
+	workflowRequests: (fetcher = fetch) => get('/api/workflow-requests', fetcher),
+	requestWorkflow: (title, description) =>
+		send('/api/workflow-requests', 'POST', { title, description }),
+
 	start: (workflow, params) => send('/api/runs', 'POST', { workflow, params }),
 	approve: (id, rowIds) => send(`/api/runs/${id}/approve`, 'POST', { rowIds }),
 	connectXero: (name = 'default') =>
