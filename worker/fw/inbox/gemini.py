@@ -80,8 +80,42 @@ def configured() -> bool:
     return bool(os.environ.get("FW_GEMINI_API_KEY", "").strip())
 
 
+# Discovered once per process, so the default survives Google retiring a model
+# without anyone editing an environment variable. A hardcoded name is a dated
+# guess: `gemini-2.5-flash` shipped as the default here and was withdrawn from
+# new keys weeks later, which cost a real sync twenty failed classifications.
+_discovered: str | None = None
+
+
+def _prefer(names: list[str]) -> str | None:
+    """The most suitable model for classification from what is available.
+
+    Flash-class first: this is a short, schema-constrained labelling call, so
+    latency and price matter far more than reasoning depth. Newest name wins
+    within a class because the list is sorted and later versions sort later.
+    """
+    usable = [n for n in names if "embedding" not in n and "vision" not in n]
+    flash = [n for n in usable if "flash" in n and "lite" not in n]
+    return (flash or usable or [None])[-1]
+
+
 def model_name() -> str:
-    return os.environ.get("FW_GEMINI_MODEL", "").strip() or DEFAULT_MODEL
+    """The model to use when the org has not chosen one.
+
+    Order: an explicit environment override, then whatever the API key can
+    actually reach, then the shipped constant as a last resort.
+    """
+    global _discovered
+    override = os.environ.get("FW_GEMINI_MODEL", "").strip()
+    if override:
+        return override
+    if _discovered:
+        return _discovered
+    try:
+        _discovered = _prefer(available_models()) or DEFAULT_MODEL
+    except Exception:  # noqa: BLE001 — discovery is best effort
+        _discovered = DEFAULT_MODEL
+    return _discovered
 
 
 def status(model: str | None = None) -> dict[str, Any]:
@@ -224,6 +258,18 @@ class GeminiClassifier:
                     else Code.CLS_UNAVAILABLE)
             reason = (f"Gemini returned {resp.status_code} for model "
                       f"'{self._model}': {_detail(resp)}")
+            if code == Code.CLS_BAD_MODEL:
+                # Name the models that would work. Being told a name is wrong
+                # without being told a right one is what turns a one-line fix
+                # into an afternoon.
+                try:
+                    usable = available_models(self._key)
+                except ClassificationError:
+                    usable = []
+                if usable:
+                    reason += (" Models this key can use: "
+                               + ", ".join(usable[:8])
+                               + ("…" if len(usable) > 8 else ""))
             CIRCUIT.record_failure(reason)
             raise ClassificationError(reason, code)
 

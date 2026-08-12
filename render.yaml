@@ -100,5 +100,10 @@ services:
       # mode a model outage produces. No part of correctness depends on it.
       - key: FW_GEMINI_API_KEY
         sync: false
+      # Deliberately empty. Pinning a model name here is a dated guess that
+      # rots: gemini-2.5-flash was the shipped default and Google withdrew it
+      # from new keys weeks later, so every classification 404'd. Left blank,
+      # the worker asks the API which models the key can actually use and
+      # picks one — and an org can override that per-org from the inbox.
       - key: FW_GEMINI_MODEL
-        value: gemini-2.5-flash
+        value: ""

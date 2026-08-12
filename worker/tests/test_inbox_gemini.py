@@ -165,6 +165,56 @@ def test_listing_without_a_key_says_so(monkeypatch):
     assert "FW_GEMINI_API_KEY" in str(caught.value)
 
 
+def test_a_404_names_models_that_would_work(monkeypatch):
+    """Being told a name is wrong without being told a right one is what turned
+    a one-line fix into an afternoon."""
+    monkeypatch.setattr(gemini.requests, "post", lambda *a, **k: FakeResponse(
+        404, {"error": {"message": "gemini-2.5-flash is no longer available"}}))
+    monkeypatch.setattr(gemini.requests, "get", lambda *a, **k: FakeResponse(
+        200, {"models": [
+            {"name": "models/gemini-3-flash",
+             "supportedGenerationMethods": ["generateContent"]},
+        ]}))
+
+    client = gemini.GeminiClassifier(api_key="k", model="gemini-2.5-flash")
+    with pytest.raises(ClassificationError) as caught:
+        client.classify("s", "b", list(SYSTEM_CATEGORIES))
+
+    assert "gemini-3-flash" in str(caught.value)
+
+
+def test_the_default_model_is_discovered_not_hardcoded(monkeypatch):
+    """A pinned name rots. This one shipped and was withdrawn weeks later."""
+    monkeypatch.delenv("FW_GEMINI_MODEL", raising=False)
+    monkeypatch.setenv("FW_GEMINI_API_KEY", "k")
+    monkeypatch.setattr(gemini, "_discovered", None)
+    monkeypatch.setattr(gemini.requests, "get", lambda *a, **k: FakeResponse(
+        200, {"models": [
+            {"name": "models/gemini-3-pro",
+             "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-3-flash",
+             "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/text-embedding-9",
+             "supportedGenerationMethods": ["embedContent"]},
+        ]}))
+
+    assert gemini.model_name() == "gemini-3-flash", \
+        "should prefer a flash-class model for a short labelling call"
+
+
+def test_discovery_falls_back_when_the_api_cannot_be_asked(monkeypatch):
+    monkeypatch.delenv("FW_GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("FW_GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(gemini, "_discovered", None)
+    assert gemini.model_name() == gemini.DEFAULT_MODEL
+
+
+def test_an_explicit_environment_override_still_wins(monkeypatch):
+    monkeypatch.setenv("FW_GEMINI_MODEL", "pinned-model")
+    monkeypatch.setattr(gemini, "_discovered", None)
+    assert gemini.model_name() == "pinned-model"
+
+
 def test_an_orgs_chosen_model_overrides_the_platform_default(monkeypatch):
     monkeypatch.setenv("FW_GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("FW_GEMINI_MODEL", "platform-default")
