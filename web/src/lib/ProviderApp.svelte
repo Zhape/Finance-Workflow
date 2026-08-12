@@ -21,12 +21,17 @@
 
 	let clientId = $state('');
 	let clientSecret = $state('');
+	let appLabel = $state('');
 	let busy = $state(false);
 	let notice = $state('');
 	let error = $state('');
 	let open = $state(false);
 
 	const own = $derived(app?.source === 'org');
+	// Several apps per provider. Xero caps an unpublished app at two
+	// organisations, so a customer with three needs more than one registration.
+	const apps = $derived(app?.apps ?? []);
+	const multiple = $derived(provider === 'xero');
 
 	async function save(event) {
 		event.preventDefault();
@@ -34,10 +39,17 @@
 		notice = '';
 		error = '';
 		try {
-			const res = await api.saveProviderApp(provider, clientId.trim(), clientSecret);
+			const res = await api.saveProviderApp(
+				provider,
+				clientId.trim(),
+				clientSecret,
+				appLabel.trim() || null
+			);
 			// Never keep a secret in component state past the request that used it.
 			clientSecret = '';
 			clientId = '';
+			appLabel = '';
+			open = false;
 			notice =
 				res.disconnected?.length > 0
 					? `Saved. ${res.disconnected.length} existing connection(s) were dropped — a token issued by the previous app cannot be refreshed by this one, so reconnect below.`
@@ -93,6 +105,20 @@
 		</div>
 	</div>
 
+	{#if own && multiple}
+		<ul class="apps">
+			{#each apps as registered (registered.name)}
+				<li>
+					<span class="app-name">{registered.label || registered.name}</span>
+					<code>{registered.clientId}</code>
+					<span class="cap" class:full={registered.full}>
+						{registered.organisations.length} / {registered.capacity} organisations
+					</span>
+				</li>
+			{/each}
+		</ul>
+	{/if}
+
 	{#if notice}<div class="banner ok">{notice}</div>{/if}
 	{#if error}<div class="banner danger">{error}</div>{/if}
 
@@ -105,6 +131,18 @@
 			</p>
 			{#if redirectUri}
 				<code class="uri">{redirectUri}</code>
+			{/if}
+
+			{#if multiple}
+				<label for="{provider}-label">Name for this application</label>
+				<input
+					id="{provider}-label"
+					type="text"
+					autocomplete="off"
+					bind:value={appLabel}
+					placeholder="UK &amp; EU app"
+					required
+				/>
 			{/if}
 
 			<label for="{provider}-id">Client ID</label>
@@ -240,6 +278,35 @@
 		color: var(--muted);
 		margin: 8px 0 0;
 		line-height: 1.5;
+	}
+	.apps {
+		list-style: none;
+		margin: 12px 0 0;
+		padding: 0;
+		display: grid;
+		gap: 6px;
+		font-size: 0.82rem;
+	}
+	.apps li {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		flex-wrap: wrap;
+		padding: 8px 10px;
+		background: #f6f7f9;
+		border-radius: 6px;
+	}
+	.app-name {
+		font-weight: 600;
+	}
+	.cap {
+		margin-left: auto;
+		color: var(--muted);
+		font-size: 0.78rem;
+	}
+	.cap.full {
+		color: var(--warn);
+		font-weight: 600;
 	}
 	code {
 		background: #eef1f5;

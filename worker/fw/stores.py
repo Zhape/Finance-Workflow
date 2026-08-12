@@ -92,7 +92,7 @@ class ConnectionStore:
         with self._engine.connect() as conn:
             row = conn.execute(
                 select(connections.c.secret, connections.c.tenant_id,
-                       connections.c.tenant_name)
+                       connections.c.tenant_name, connections.c.app_name)
                 .where(connections.c.org_id == org_id)
                 .where(connections.c.provider == self._provider)
                 .where(connections.c.name == connection)
@@ -104,6 +104,10 @@ class ConnectionStore:
         # without decrypting anything.
         token.setdefault("tenant_id", row.tenant_id)
         token.setdefault("tenant_name", row.tenant_name)
+        # Carried so a refresh resolves the client that issued this token.
+        # Using another app's credentials fails with invalid_grant, and it
+        # fails mid-run rather than at the moment someone changed a setting.
+        token.setdefault("app_name", row.app_name)
         return token
 
     def save(self, org_id: str, connection: str, token: dict[str, Any]) -> None:
@@ -113,8 +117,11 @@ class ConnectionStore:
             "key_id": self._cipher.key_id,
             "tenant_id": token.get("tenant_id"),
             "tenant_name": token.get("tenant_name"),
+            "app_name": token.get("app_name"),
             "updated_at": _now(),
         }
+        if token.get("tenant_name") or token.get("label"):
+            values["label"] = token.get("label") or token.get("tenant_name")
         with self._engine.begin() as conn:
             existing = conn.execute(
                 select(connections.c.id)
@@ -129,9 +136,13 @@ class ConnectionStore:
                     .values(**values)
                 )
             else:
+                # Xero's own name for the organisation when we have it. An
+                # upper-cased slot name is what produced "XERO — US" for a
+                # company actually called something else.
+                values.setdefault("label", connection.upper())
                 conn.execute(insert(connections).values(
                     id=_uuid(), org_id=org_id, provider=self._provider,
-                    name=connection, label=connection.upper(),
+                    name=connection,
                     connected_by=token.get("connected_by"), **values,
                 ))
 
@@ -147,6 +158,7 @@ class ConnectionStore:
         """
         stmt = (select(connections.c.name, connections.c.label,
                        connections.c.provider, connections.c.tenant_name,
+                       connections.c.tenant_id, connections.c.app_name,
                        connections.c.connected_by, connections.c.updated_at)
                 .where(connections.c.org_id == org_id)
                 .order_by(connections.c.name))
@@ -160,6 +172,8 @@ class ConnectionStore:
                 "label": r.label,
                 "provider": r.provider,
                 "tenantName": r.tenant_name,
+                "tenantId": r.tenant_id,
+                "appName": r.app_name,
                 "connectedBy": r.connected_by,
                 "updatedAt": r.updated_at.isoformat() if r.updated_at else None,
             }
@@ -362,12 +376,21 @@ class WorkflowAccessStore:
 
 
 class ProviderAppStore:
-    """The OAuth application an org connects through.
+    """The OAuth applications an org connects through.
 
     Resolution is org row first, platform environment second. That ordering is
     the whole design: most orgs never register an app and ride the platform's,
     while an org that insists on its own gets it without a code change.
+
+    Several per provider, because an unpublished Xero app may be connected to
+    only two organisations. A customer with three needs two apps, and each
+    connection must remember which one issued its token — a refresh token is
+    bound to the client that minted it.
     """
+
+    # Xero's ceiling for an unpublished app. Used to warn before someone spends
+    # a consent flow discovering it.
+    ORGS_PER_UNPUBLISHED_APP = 2
 
     def __init__(self, engine, cipher: Cipher | None = None,
                  provider: str = "xero"):
@@ -375,39 +398,75 @@ class ProviderAppStore:
         self._cipher = cipher or Cipher()
         self._provider = provider
 
-    def get(self, org_id: str) -> tuple[str, str] | None:
-        """Return (client_id, client_secret) for this org, or None to fall back."""
-        with self._engine.connect() as conn:
-            row = conn.execute(
-                select(provider_apps.c.client_id, provider_apps.c.secret)
+    def get(self, org_id: str, name: str | None = None) -> tuple[str, str] | None:
+        """Return (client_id, client_secret), or None to fall back.
+
+        With no name, the first app by name — which is what a caller that
+        predates multiple apps means, and what a single-app org still has.
+        """
+        stmt = (select(provider_apps.c.client_id, provider_apps.c.secret)
                 .where(provider_apps.c.org_id == org_id)
                 .where(provider_apps.c.provider == self._provider)
-            ).first()
+                .order_by(provider_apps.c.name))
+        if name:
+            stmt = stmt.where(provider_apps.c.name == name)
+        with self._engine.connect() as conn:
+            row = conn.execute(stmt).first()
         if row is None:
             return None
         return row.client_id, self._cipher.decrypt(row.secret)
 
-    def status(self, org_id: str) -> dict[str, Any]:
-        """Metadata for the UI. Returns the client id, never the secret."""
+    def list(self, org_id: str) -> list[dict[str, Any]]:
+        """Every app this org has registered. Never returns a secret."""
         with self._engine.connect() as conn:
-            row = conn.execute(
-                select(provider_apps.c.client_id, provider_apps.c.label,
-                       provider_apps.c.updated_by, provider_apps.c.updated_at)
+            rows = conn.execute(
+                select(provider_apps.c.name, provider_apps.c.client_id,
+                       provider_apps.c.label, provider_apps.c.updated_by,
+                       provider_apps.c.updated_at)
                 .where(provider_apps.c.org_id == org_id)
                 .where(provider_apps.c.provider == self._provider)
-            ).first()
-        if row is None:
-            return {"source": "platform", "clientId": None}
+                .order_by(provider_apps.c.name)
+            ).all()
+            used = conn.execute(
+                select(connections.c.app_name, connections.c.tenant_id)
+                .where(connections.c.org_id == org_id)
+                .where(connections.c.provider == self._provider)
+            ).all()
+
+        # Capacity is counted in distinct organisations, not rows: two
+        # connections to the same tenant consume one of the two slots.
+        per_app: dict[str, set[str]] = {}
+        for r in used:
+            per_app.setdefault(r.app_name or "", set()).add(r.tenant_id or "")
+
+        return [{
+            "name": r.name,
+            "clientId": r.client_id,
+            "label": r.label,
+            "updatedBy": r.updated_by,
+            "updatedAt": r.updated_at.isoformat() if r.updated_at else None,
+            "organisations": sorted(per_app.get(r.name, set())),
+            "capacity": self.ORGS_PER_UNPUBLISHED_APP,
+            "full": len(per_app.get(r.name, set())) >= self.ORGS_PER_UNPUBLISHED_APP,
+        } for r in rows]
+
+    def status(self, org_id: str) -> dict[str, Any]:
+        """Metadata for the UI. Returns client ids, never a secret."""
+        apps = self.list(org_id)
+        if not apps:
+            return {"source": "platform", "clientId": None, "apps": []}
         return {
             "source": "org",
-            "clientId": row.client_id,
-            "label": row.label,
-            "updatedBy": row.updated_by,
-            "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+            "clientId": apps[0]["clientId"],
+            "label": apps[0]["label"],
+            "updatedBy": apps[0]["updatedBy"],
+            "updatedAt": apps[0]["updatedAt"],
+            "apps": apps,
         }
 
     def save(self, org_id: str, client_id: str, client_secret: str,
-             user: str, label: str | None = None) -> None:
+             user: str, label: str | None = None,
+             name: str = "default") -> None:
         values = {
             "client_id": client_id.strip(),
             "secret": self._cipher.encrypt(client_secret),
@@ -421,28 +480,46 @@ class ProviderAppStore:
                 select(provider_apps.c.org_id)
                 .where(provider_apps.c.org_id == org_id)
                 .where(provider_apps.c.provider == self._provider)
+                .where(provider_apps.c.name == name)
             ).first()
             if existing:
                 conn.execute(
                     update(provider_apps)
                     .where(provider_apps.c.org_id == org_id)
                     .where(provider_apps.c.provider == self._provider)
+                    .where(provider_apps.c.name == name)
                     .values(**values)
                 )
             else:
                 conn.execute(insert(provider_apps).values(
-                    org_id=org_id, provider=self._provider, **values
+                    org_id=org_id, provider=self._provider, name=name, **values
                 ))
 
-    def clear(self, org_id: str) -> bool:
-        """Revert this org to the platform application."""
-        with self._engine.begin() as conn:
-            result = conn.execute(
-                delete(provider_apps)
+    def in_use(self, org_id: str, name: str) -> int:
+        """How many connections depend on this app."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(connections.c.id)
+                .where(connections.c.org_id == org_id)
+                .where(connections.c.provider == self._provider)
+                .where(connections.c.app_name == name)
+            ).all()
+        return len(rows)
+
+    def clear(self, org_id: str, name: str | None = None) -> bool:
+        """Remove an app, or every app for this provider.
+
+        Callers must check `in_use` first: a token cannot be refreshed once the
+        client that issued it is gone, so removing an app with live connections
+        breaks them at the next refresh rather than at the moment of removal.
+        """
+        stmt = (delete(provider_apps)
                 .where(provider_apps.c.org_id == org_id)
-                .where(provider_apps.c.provider == self._provider)
-            )
-        return result.rowcount > 0
+                .where(provider_apps.c.provider == self._provider))
+        if name:
+            stmt = stmt.where(provider_apps.c.name == name)
+        with self._engine.begin() as conn:
+            return conn.execute(stmt).rowcount > 0
 
 
 class OAuthStateStore:

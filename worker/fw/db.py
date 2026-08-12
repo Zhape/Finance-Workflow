@@ -85,6 +85,10 @@ connections = Table(
     Column("tenant_name", Text),
     Column("secret", LargeBinary, nullable=False),
     Column("key_id", Text, nullable=False),
+    # Which provider_apps row issued this token. A refresh token is bound to
+    # the client that minted it, so using another app's credentials fails with
+    # invalid_grant. Null means the platform's shared application.
+    Column("app_name", Text),
     Column("connected_by", Text),
     Column("created_at", DateTime(timezone=True), server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), server_default=func.now()),
@@ -98,6 +102,9 @@ provider_apps = Table(
     Column("org_id", _Id, ForeignKey("orgs.id", ondelete="CASCADE"),
            primary_key=True),
     Column("provider", Text, primary_key=True),
+    # Several apps per provider: an unpublished Xero app may be connected to
+    # only two organisations, so a customer with three needs more than one.
+    Column("name", Text, primary_key=True, server_default="default"),
     Column("client_id", Text, nullable=False),
     Column("secret", LargeBinary, nullable=False),
     Column("key_id", Text, nullable=False),

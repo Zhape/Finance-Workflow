@@ -37,7 +37,10 @@ class ParamSpec:
             raise ValueError(f"{self.label} is required.")
         if value in (None, ""):
             return self.default
-        if self.type == "choice" and value not in self.options:
+        # An empty option list means the platform supplies the choices per
+        # org — connected Xero organisations, for instance, which the module
+        # cannot know. Validating against [] would reject every real answer.
+        if self.type == "choice" and self.options and value not in self.options:
             raise ValueError(
                 f"{self.label}: {value!r} is not one of {self.options}."
             )

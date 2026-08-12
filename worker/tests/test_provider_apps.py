@@ -73,7 +73,13 @@ def test_status_shows_the_client_id_but_never_the_secret(engine, two_orgs, apps)
 
 def test_status_reports_platform_when_the_org_has_no_app(engine, two_orgs, apps):
     _, globex = two_orgs
-    assert apps.status(globex) == {"source": "platform", "clientId": None}
+    status = apps.status(globex)
+    # Asserted by meaning rather than by exact shape. The contract is "this org
+    # rides the platform application and has none of its own"; pinning the whole
+    # dict turns every added field into a false failure.
+    assert status["source"] == "platform"
+    assert status["clientId"] is None
+    assert status["apps"] == []
 
 
 def test_saving_twice_replaces_rather_than_duplicates(engine, two_orgs, apps):

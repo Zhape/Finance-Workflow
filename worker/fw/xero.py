@@ -106,7 +106,12 @@ class XeroCredentials:
         from .oauth import OAuthError, _client
 
         try:
-            client_id, client_secret, _redirect = _client(self._org_id, self._apps)
+            # The client that issued this token, not merely one of the org's.
+            # A refresh token is bound to its client, so using a sibling app's
+            # credentials fails with invalid_grant partway through a run.
+            client_id, client_secret, _redirect = _client(
+                self._org_id, self._apps, token.get("app_name")
+            )
         except OAuthError as exc:
             raise XeroError(str(exc)) from None
 
@@ -133,6 +138,7 @@ class XeroCredentials:
         new["obtained_at"] = time.time()
         new["tenant_id"] = token.get("tenant_id")
         new["tenant_name"] = token.get("tenant_name")
+        new["app_name"] = token.get("app_name")
         self._store.save(self._org_id, connection, new)
         return new
 

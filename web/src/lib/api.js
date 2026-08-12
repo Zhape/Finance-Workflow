@@ -80,14 +80,20 @@ export const api = {
 	connections: (fetcher = fetch) => get('/api/connections', fetcher),
 	xeroSetup: (fetcher = fetch) => get('/api/connections/xero/setup', fetcher),
 	// Provider-agnostic: 'xero' or 'google'. The worker rejects anything else.
-	saveProviderApp: (provider, clientId, clientSecret, label = null) =>
+	saveProviderApp: (provider, clientId, clientSecret, label = null, name = null) =>
 		send(`/api/connections/${encodeURIComponent(provider)}/app`, 'PUT', {
 			clientId,
 			clientSecret,
-			label
+			label,
+			name
 		}),
-	clearProviderApp: (provider) =>
-		send(`/api/connections/${encodeURIComponent(provider)}/app`, 'DELETE'),
+	clearProviderApp: (provider, name = null) =>
+		send(
+			name
+				? `/api/connections/${encodeURIComponent(provider)}/app?name=${encodeURIComponent(name)}`
+				: `/api/connections/${encodeURIComponent(provider)}/app`,
+			'DELETE'
+		),
 
 	googleSetup: (fetcher = fetch) => get('/api/connections/google/setup', fetcher),
 	connectGoogle: () => send('/api/connections/google/start', 'POST'),
@@ -147,8 +153,16 @@ export const api = {
 
 	start: (workflow, params) => send('/api/runs', 'POST', { workflow, params }),
 	approve: (id, rowIds) => send(`/api/runs/${id}/approve`, 'POST', { rowIds }),
-	connectXero: (name = 'default') =>
-		send(`/api/connections/xero/start?name=${encodeURIComponent(name)}`, 'POST'),
+	// `appName` picks which registered Xero application authenticates. An
+	// unpublished Xero app holds only two organisations, so a third has to be
+	// connected through a different one.
+	connectXero: (appName = null) =>
+		send(
+			appName
+				? `/api/connections/xero/start?app_name=${encodeURIComponent(appName)}`
+				: '/api/connections/xero/start',
+			'POST'
+		),
 	disconnect: (name) => send(`/api/connections/${encodeURIComponent(name)}`, 'DELETE'),
 
 	// The artifact is a normal download, but it still needs the auth headers,

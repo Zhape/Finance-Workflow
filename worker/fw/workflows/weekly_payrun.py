@@ -60,6 +60,20 @@ SPEC = WorkflowSpec(
     approve_label="Approve and build bank file",
     params=[
         ParamSpec(
+            name="connection",
+            type="choice",
+            label="Xero organisation",
+            required=False,
+            # Filled in by the API from this org's connected organisations.
+            # The region map below is the historical fallback: it named
+            # connections 'default' and 'us', which described one customer's
+            # Xero estate on one day and nothing since.
+            options=[],
+            default=None,
+            help="Which connected Xero organisation to read bills from. "
+                 "Leave blank to use the one this region has always used.",
+        ),
+        ParamSpec(
             name="region",
             type="choice",
             label="Region",
@@ -151,8 +165,10 @@ def run(params: dict[str, Any], ctx: RunContext) -> RunResult:
     if bank is None:
         raise ValueError("No vendor bank details configured for this organisation.")
 
-    note(f"Connecting to Xero ({cfg['connection']})…")
-    access_token, tenant_id = ctx.creds.xero(cfg["connection"])
+    # An explicit choice wins; otherwise the region's historical mapping.
+    connection = params.get("connection") or cfg["connection"]
+    note(f"Connecting to Xero ({connection})…")
+    access_token, tenant_id = ctx.creds.xero(connection)
     client = XeroClient(access_token, tenant_id)
 
     note("Pulling approved bills…")

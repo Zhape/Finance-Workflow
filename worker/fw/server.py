@@ -124,6 +124,34 @@ def _run_json(run: dict | None, org_id: str) -> dict | None:
     return run
 
 
+def _xero_choices(org_id: str) -> tuple[list[str], list[dict[str, str]]]:
+    """This org's connected Xero organisations, as form choices.
+
+    Returned as names plus labels so the form can show "Funraisin Limited
+    (UK)" while storing the stable connection name a run is recorded against.
+    """
+    rows = _connections().list(org_id, provider="xero")
+    return ([c["name"] for c in rows],
+            [{"value": c["name"], "label": c["tenantName"] or c["label"] or c["name"]}
+             for c in rows])
+
+
+def _with_org_choices(item: dict, org_id: str) -> dict:
+    """Fill any parameter the module left for the platform to populate.
+
+    A workflow module cannot know which Xero organisations a customer has
+    connected, so it declares `options=[]` and the platform supplies them here.
+    """
+    names, labels = _xero_choices(org_id)
+    for param in item.get("params", []):
+        if param["name"] == "connection" and not param["options"]:
+            param["options"] = names
+            param["optionLabels"] = labels
+            if param.get("default") is None and names:
+                param["default"] = names[0]
+    return item
+
+
 def _defaults_for(module):
     """The wording a workflow ships with, if it has any."""
     getter = getattr(module, "default_templates", None)
@@ -235,7 +263,7 @@ def list_workflows(principal: Principal = Depends(me)):
         # Whether the workflow has editable wording is a property of the
         # module, not something the UI should hardcode by key.
         item["hasTemplates"] = bool(_defaults_for(workflows.get(spec.key)))
-        out.append(item)
+        out.append(_with_org_choices(item, principal.org_id))
     # Tools are the same grant, a different shape: their own screen rather than
     # a launch form. Filtered by the same rule, so an org still never sees a
     # tile it cannot use.
@@ -286,10 +314,40 @@ def xero_setup(principal: Principal = Depends(me)):
 
 
 @app.post("/api/connections/xero/start")
-def start_xero(name: str = "default", principal: Principal = Depends(me)):
+def start_xero(app_name: str | None = None, name: str = "default",
+               principal: Principal = Depends(me)):
+    """Begin consent, through a named application.
+
+    `app_name` chooses which of the org's Xero applications to authenticate
+    with. It matters because an unpublished Xero app may hold only two
+    organisations, so a customer with three connects some through one app and
+    the rest through another — and each token must be refreshed by the client
+    that issued it.
+
+    The chosen app rides in the state's `name` field: the state is server-side
+    and single-use, so the browser never carries a value the callback trusts.
+    """
     principal.require("admin")
+    apps = _apps_for("xero")
+    registered = {a["name"] for a in apps.list(principal.org_id)}
+    if app_name and app_name not in registered:
+        raise HTTPException(404, f"No Xero application named {app_name!r}.")
+
+    chosen = app_name or (sorted(registered)[0] if registered else None)
+    if chosen:
+        full = next((a for a in apps.list(principal.org_id)
+                     if a["name"] == chosen and a["full"]), None)
+        if full:
+            raise HTTPException(
+                409,
+                f"{full['label'] or chosen} is already connected to "
+                f"{len(full['organisations'])} organisations, which is the "
+                f"limit for an unpublished Xero app. Add another application "
+                f"and connect through that one."
+            )
     try:
-        url = oauth.start(STATES, principal.org_id, name, principal.email, _apps())
+        url = oauth.start(STATES, principal.org_id, chosen or name,
+                          principal.email, _apps(), app_name=chosen)
     except oauth.OAuthError as exc:
         raise HTTPException(500, str(exc)) from None
     return {"url": url}
@@ -309,31 +367,82 @@ def xero_callback(code: str | None = None, state: str | None = None,
     if pending is None:
         return RedirectResponse(f"{WEB_ORIGIN}/settings?error=expired_state")
 
+    # The application this consent was started through. Read from the state we
+    # minted, never from the query string.
+    app_name = pending.get("name") or None
+    if app_name and not _apps_for("xero").list(pending["org_id"]):
+        app_name = None          # the org rides the platform application
+
     try:
-        token = oauth.exchange(code, pending["verifier"], pending["org_id"], _apps())
+        token = oauth.exchange(code, pending["verifier"], pending["org_id"],
+                               _apps(), app_name=app_name)
         found = oauth.tenants(token["access_token"])
         if not found:
             return RedirectResponse(f"{WEB_ORIGIN}/settings?error=no_organisations")
-        token["tenant_id"] = found[0]["tenantId"]
-        token["tenant_name"] = found[0].get("tenantName", "")
-        token["connected_by"] = pending["created_by"]
-        _connections().save(pending["org_id"], pending["name"], token)
+
+        # One connection per organisation granted, named from Xero. The old
+        # code stored found[0] against a fixed slot, so granting three
+        # organisations recorded one — and two differently named slots could
+        # point at the same company with nothing on screen to reveal it.
+        store = _connections()
+        taken = {c["name"] for c in store.list(pending["org_id"], provider="xero")}
+        saved: list[str] = []
+        for tenant in found:
+            tenant_name = tenant.get("tenantName", "") or ""
+            name = _slug(tenant_name) or _slug(tenant["tenantId"])
+            # Reuse the row for an organisation already connected rather than
+            # creating a near-duplicate under a suffixed name.
+            existing = next(
+                (c["name"] for c in store.list(pending["org_id"], provider="xero")
+                 if c.get("tenantId") == tenant["tenantId"]), None)
+            if existing:
+                name = existing
+            elif name in taken:
+                name = f"{name}-{tenant['tenantId'][:6]}"
+            taken.add(name)
+
+            per_tenant = dict(token)
+            per_tenant["tenant_id"] = tenant["tenantId"]
+            per_tenant["tenant_name"] = tenant_name
+            per_tenant["label"] = tenant_name or name
+            per_tenant["app_name"] = app_name
+            per_tenant["connected_by"] = pending["created_by"]
+            store.save(pending["org_id"], name, per_tenant)
+            saved.append(name)
     except (oauth.OAuthError, EncryptionError):
         return RedirectResponse(f"{WEB_ORIGIN}/settings?error=exchange_failed")
 
-    return RedirectResponse(f"{WEB_ORIGIN}/settings?connected={pending['name']}")
+    return RedirectResponse(
+        f"{WEB_ORIGIN}/settings?connected={len(saved)}"
+    )
 
 
 class ProviderApp(BaseModel):
     clientId: str
     clientSecret: str
     label: str | None = None
+    # Several apps per provider. Absent means the org's first/only one, which
+    # is what a caller predating multiple apps means.
+    name: str | None = None
 
 
 XeroApp = ProviderApp  # the model is provider-agnostic; name kept for clarity
 
 
-def _drop_connections(provider: str, org_id: str) -> list[str]:
+def _slug(text: str) -> str:
+    """A connection name from an organisation name.
+
+    Names are the stable identifier a workflow parameter stores, so they must
+    be URL- and form-safe; the human-facing string lives in `label`.
+    """
+    import re
+
+    cleaned = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return cleaned[:40] or "org"
+
+
+def _drop_connections(provider: str, org_id: str,
+                      app_name: str | None = None) -> list[str]:
     """Forget an org's tokens for a provider.
 
     Called whenever the application changes. A refresh token is bound to the
@@ -342,7 +451,12 @@ def _drop_connections(provider: str, org_id: str) -> list[str]:
     the moment someone deliberately changed the setting.
     """
     store = _connections_for(provider)
-    dropped = [c["name"] for c in store.list(org_id)]
+    rows = store.list(org_id, provider=provider)
+    if app_name is not None:
+        # Only the connections this application issued. With several apps in
+        # play, replacing one must not invalidate tokens minted by another.
+        rows = [c for c in rows if (c.get("appName") or "default") == app_name]
+    dropped = [c["name"] for c in rows]
     for name in dropped:
         store.disconnect(org_id, name)
     return dropped
@@ -356,20 +470,49 @@ def save_provider_app(provider: str, body: XeroApp,
     apps = _apps_for(provider)
     if not body.clientId.strip() or not body.clientSecret.strip():
         raise HTTPException(422, "Both the Client ID and the secret are required.")
+
+    name = _slug(body.name or body.label or "") or "default"
     apps.save(principal.org_id, body.clientId, body.clientSecret,
-              principal.email, body.label)
-    return {"ok": True, "disconnected": _drop_connections(provider, principal.org_id)}
+              principal.email, body.label, name=name)
+    # Only this app's connections. A token is bound to the client that issued
+    # it, so replacing app A's credentials cannot refresh A's tokens — but it
+    # has no bearing on B's.
+    return {"ok": True, "name": name,
+            "disconnected": _drop_connections(provider, principal.org_id, name),
+            "apps": apps.list(principal.org_id)}
 
 
 @app.delete("/api/connections/{provider}/app")
-def clear_provider_app(provider: str, principal: Principal = Depends(me)):
-    """Revert this org to the platform's application for a provider."""
+def clear_provider_app(provider: str, name: str | None = None,
+                       principal: Principal = Depends(me)):
+    """Remove an org's own application, or revert the provider entirely.
+
+    Refused while any connection still depends on it. A refresh token cannot
+    outlive the client that issued it, so removing an app in use does not fail
+    now — it fails silently later, mid-run, with invalid_grant. Better to say
+    no and name what is in the way.
+    """
     principal.require("admin")
-    if not _apps_for(provider).clear(principal.org_id):
+    apps = _apps_for(provider)
+
+    holding = [a for a in apps.list(principal.org_id)
+               if (name is None or a["name"] == name) and a["organisations"]]
+    if holding:
+        blocked = ", ".join(a["label"] or a["name"] for a in holding)
+        raise HTTPException(
+            409,
+            f"{blocked} still has connected organisations. Disconnect them "
+            f"first — a token cannot be refreshed once the application that "
+            f"issued it is gone."
+        )
+
+    if not apps.clear(principal.org_id, name):
         raise HTTPException(
             404, f"This organisation has no {provider} app of its own."
         )
-    return {"ok": True, "disconnected": _drop_connections(provider, principal.org_id)}
+    return {"ok": True,
+            "disconnected": _drop_connections(provider, principal.org_id, name),
+            "apps": apps.list(principal.org_id)}
 
 
 @app.get("/api/connections/google/setup")
@@ -611,6 +754,17 @@ def start_run(body: StartRun, principal: Principal = Depends(me)):
         params = module.SPEC.parse(body.params)
     except ParamError as exc:
         raise HTTPException(422, detail={"fieldErrors": exc.errors}) from None
+
+    chosen = params.get("connection")
+    if chosen:
+        names, _labels = _xero_choices(principal.org_id)
+        if chosen not in names:
+            # Caught here so the answer names the connection, rather than
+            # surfacing later as an opaque Xero authorisation failure.
+            raise HTTPException(422, detail={"fieldErrors": {
+                "connection": f"{chosen!r} is not a connected Xero "
+                              f"organisation for this workspace."
+            }})
 
     region = params.get("region")
     run_id = RUNS.create(principal.org_id, body.workflow, params, principal.email)

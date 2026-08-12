@@ -230,6 +230,7 @@ def _refresh(org_id: str, store, apps, connection: str, token: dict,
     # Google does not return the refresh token again on refresh.
     new.setdefault("refresh_token", token["refresh_token"])
     new["mailbox"] = token.get("mailbox")
+    new["app_name"] = token.get("app_name")
     store.save(org_id, connection, new)
     return new
 

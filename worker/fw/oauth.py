@@ -75,7 +75,8 @@ def redirect_uri() -> str:
     ).strip()
 
 
-def _client(org_id: str | None = None, apps=None) -> tuple[str, str, str]:
+def _client(org_id: str | None = None, apps=None,
+            app_name: str | None = None) -> tuple[str, str, str]:
     """Resolve the Xero application to use: the org's own, else the platform's.
 
     The redirect URI is always the platform's, because it points at this
@@ -85,7 +86,7 @@ def _client(org_id: str | None = None, apps=None) -> tuple[str, str, str]:
     """
     client_id = secret = ""
     if apps is not None and org_id:
-        found = apps.get(org_id)
+        found = apps.get(org_id, app_name)
         if found:
             client_id, secret = found
 
@@ -110,6 +111,8 @@ def setup_status(org_id: str | None = None, apps=None) -> dict:
     mismatch that only appears at the end of the consent flow.
     """
     try:
+        # Deliberately no app name: the question here is "is anything
+        # configured at all", which any of the org's applications answers.
         client_id, _secret, redirect = _client(org_id, apps)
         configured = True
     except OAuthError:
@@ -129,9 +132,10 @@ def setup_status(org_id: str | None = None, apps=None) -> dict:
     }
 
 
-def start(state_store, org_id: str, name: str, user: str, apps=None) -> str:
+def start(state_store, org_id: str, name: str, user: str, apps=None,
+          app_name: str | None = None) -> str:
     """Create a PKCE challenge, stash the verifier, return the consent URL."""
-    client_id, _secret, redirect = _client(org_id, apps)
+    client_id, _secret, redirect = _client(org_id, apps, app_name)
 
     from .env import redirect_warning
 
@@ -162,11 +166,12 @@ def start(state_store, org_id: str, name: str, user: str, apps=None) -> str:
     )
 
 
-def exchange(code: str, verifier: str, org_id: str | None = None, apps=None) -> dict:
+def exchange(code: str, verifier: str, org_id: str | None = None,
+             apps=None, app_name: str | None = None) -> dict:
     # Resolved again rather than carried through the round trip: the org cannot
     # change between start and callback, and re-resolving avoids parking a
     # client secret in the oauth_states row.
-    client_id, client_secret, redirect = _client(org_id, apps)
+    client_id, client_secret, redirect = _client(org_id, apps, app_name)
     data = {
         "grant_type": "authorization_code",
         "client_id": client_id,

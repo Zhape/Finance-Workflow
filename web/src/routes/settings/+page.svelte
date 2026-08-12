@@ -5,20 +5,10 @@
 	import { session } from '$lib/session.svelte.js';
 	import ProviderApp from '$lib/ProviderApp.svelte';
 
-	// Each region draws from a named Xero connection. UK and EU share one Xero
-	// organisation; the US is separate, mirroring how the accounts are held.
-	const SLOTS = [
-		{
-			name: 'default',
-			label: 'Xero — UK & EU',
-			hint: 'Sign in as the Xero user who can see the UK organisation. EU pay runs read from the same one.'
-		},
-		{
-			name: 'us',
-			label: 'Xero — US',
-			hint: 'A separate Xero organisation. If you only have one, connect it here too and pick it at the org chooser.'
-		}
-	];
+	// No fixed slots. "Xero — UK & EU" and "Xero — US" described one customer's
+	// Xero estate on one day, and stopped being true the moment they added a
+	// third organisation. Connections are now whatever Xero says was granted,
+	// named and labelled from Xero itself.
 
 	const ERRORS = {
 		expired_state: 'That took longer than 10 minutes, so the request expired. Start again.',
@@ -50,9 +40,10 @@
 	const isAdmin = $derived(session.role === 'admin');
 	const notice = $derived($page.url.searchParams.get('connected'));
 	const callbackError = $derived($page.url.searchParams.get('error'));
-	const allConnected = $derived(
-		loaded && SLOTS.every((s) => connections.some((c) => c.name === s.name && c.provider === 'xero'))
-	);
+	const xeroConnections = $derived(connections.filter((c) => c.provider === 'xero'));
+	const apps = $derived(setup?.app?.apps ?? []);
+	const usingOwnApp = $derived(setup?.app?.source === 'org');
+	const allConnected = $derived(loaded && xeroConnections.length > 0);
 
 	onMount(async () => {
 		await refresh();
@@ -123,13 +114,15 @@
 		gmailBusy = false;
 	}
 
-	async function connect(name) {
-		busy = name;
+	async function connect(appName) {
+		busy = appName ?? 'connect';
 		error = '';
 		try {
 			// The worker mints the PKCE challenge and holds the verifier; we only
-			// ever receive the URL to send the person to.
-			const { url } = await api.connectXero(name);
+			// ever receive the URL to send the person to. `appName` decides which
+			// registered Xero application authenticates — an unpublished one holds
+			// only two organisations, so a third has to come through another.
+			const { url } = await api.connectXero(appName);
 			window.location.href = url;
 		} catch (e) {
 			error = e.message;
@@ -250,41 +243,80 @@
 {/if}
 
 <div class="rows">
-	{#each SLOTS as slot (slot.name)}
-		{@const existing = connectedTo(slot.name)}
+	{#if loaded && xeroConnections.length === 0}
+		<p class="empty-row">
+			No Xero organisation is connected yet. Connect one below — everything Xero
+			grants on the consent screen appears here, named as Xero names it.
+		</p>
+	{/if}
+
+	{#each xeroConnections as conn (conn.name)}
 		<div class="row">
 			<div class="who">
-				<div class="name">{slot.label}</div>
-				{#if existing}
-					<div class="meta">
-						Connected to <strong>{existing.tenantName ?? 'a Xero organisation'}</strong>
-						· by {existing.connectedBy ?? 'unknown'}
-					</div>
-				{:else if loaded}
-					<div class="meta">{slot.hint}</div>
-				{/if}
+				<div class="name">{conn.tenantName || conn.label || conn.name}</div>
+				<div class="meta">
+					by {conn.connectedBy ?? 'unknown'}
+					{#if conn.appName}· via {apps.find((a) => a.name === conn.appName)?.label ?? conn.appName}{/if}
+					· <code>{conn.name}</code>
+				</div>
 			</div>
 			<div class="actions">
-				{#if existing}
-					<span class="pill ok">Connected</span>
-					<button
-						class="ghost"
-						disabled={!isAdmin || busy === slot.name}
-						onclick={() => disconnect(slot.name)}
-					>
-						Disconnect
-					</button>
-				{:else}
-					<button
-						disabled={!isAdmin || busy === slot.name || (setup && !setup.appConfigured)}
-						onclick={() => connect(slot.name)}
-					>
-						{busy === slot.name ? 'Opening Xero…' : 'Connect Xero'}
-					</button>
-				{/if}
+				<span class="pill ok">Connected</span>
+				<button
+					class="ghost"
+					disabled={!isAdmin || busy === conn.name}
+					onclick={() => disconnect(conn.name)}
+				>
+					Disconnect
+				</button>
 			</div>
 		</div>
 	{/each}
+
+	{#if usingOwnApp}
+		{#each apps as app (app.name)}
+			<div class="row">
+				<div class="who">
+					<div class="name">Connect through {app.label || app.name}</div>
+					<div class="meta">
+						{app.organisations.length} of {app.capacity} organisations used.
+						{#if app.full}
+							An unpublished Xero app cannot hold more — add another application
+							above and connect the rest through it.
+						{:else}
+							Xero will ask which organisations to grant; each one becomes a row here.
+						{/if}
+					</div>
+				</div>
+				<div class="actions">
+					<button
+						disabled={!isAdmin || app.full || busy === app.name}
+						onclick={() => connect(app.name)}
+					>
+						{busy === app.name ? 'Opening Xero…' : 'Connect Xero'}
+					</button>
+				</div>
+			</div>
+		{/each}
+	{:else}
+		<div class="row">
+			<div class="who">
+				<div class="name">Connect a Xero organisation</div>
+				<div class="meta">
+					Using the shared application. Xero will ask which organisations to
+					grant; each one becomes a row here.
+				</div>
+			</div>
+			<div class="actions">
+				<button
+					disabled={!isAdmin || busy === 'connect' || (setup && !setup.appConfigured)}
+					onclick={() => connect(null)}
+				>
+					{busy === 'connect' ? 'Opening Xero…' : 'Connect Xero'}
+				</button>
+			</div>
+		</div>
+	{/if}
 </div>
 
 {#if !isAdmin}

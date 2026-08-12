@@ -50,8 +50,11 @@ SPEC = WorkflowSpec(
             name="connection",
             type="choice",
             label="Xero organisation",
-            options=["default", "us"],
-            default="default",
+            # Filled in by the API from this org's connected organisations.
+            # Hardcoding "default" and "us" described one customer's Xero
+            # estate, and stopped being true the moment they added a third.
+            options=[],
+            default=None,
             help="Which connected Xero organisation to read receivables from.",
         ),
         ParamSpec(
