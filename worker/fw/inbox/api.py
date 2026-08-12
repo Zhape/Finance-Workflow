@@ -57,6 +57,10 @@ class DraftEdit(BaseModel):
 class SettingsEdit(BaseModel):
     lookbackDays: int
     xeroConnection: str = "default"
+    # Null on either means "keep using the default", which is why they are
+    # optional rather than defaulted to a guess.
+    xeroTenantId: str | None = None
+    classifierModel: str | None = None
 
 
 class NewCategory(BaseModel):
@@ -149,15 +153,22 @@ def build_router(*, engine, principal_dep: Callable[..., Principal],
         return out
 
     def xero_client(org_id: str) -> tuple[XeroClient | None, str | None, str | None]:
-        """(client, tenant id, error) — never raises, so a sync can continue."""
-        connection = settings.get(org_id)["xeroConnection"]
+        """(client, tenant id, error) — never raises, so a sync can continue.
+
+        The organisation is the org's explicit choice when it has made one.
+        Without that, it is whichever tenant the consent callback happened to
+        record — the first one Xero listed — which is how two differently named
+        connections ended up pointing at the same company.
+        """
+        current = settings.get(org_id)
         try:
             from ..xero import XeroCredentials
 
             creds = XeroCredentials(org_id, xero_connections(),
                                     log=lambda m: None, apps=xero_apps())
-            token, tenant_id = creds.xero(connection)
-            return XeroClient(token, tenant_id), tenant_id, None
+            token, tenant_id = creds.xero(current["xeroConnection"])
+            chosen = current.get("xeroTenantId") or tenant_id
+            return XeroClient(token, chosen), chosen, None
         except XeroError as exc:
             return None, None, str(exc)
 
@@ -170,10 +181,11 @@ def build_router(*, engine, principal_dep: Callable[..., Principal],
 
     def build_pipeline(principal: Principal) -> tuple[Pipeline, str | None]:
         client, tenant_id, xero_error = xero_client(principal.org_id)
+        chosen_model = settings.get(principal.org_id).get("classifierModel")
         pipeline = Pipeline(
             org_id=principal.org_id,
             stores=stores,
-            classification_client=gemini.client(),
+            classification_client=gemini.client(chosen_model),
             xero=client,
             xero_tenant_id=tenant_id,
             sender_name=sender_name(principal),
@@ -194,7 +206,8 @@ def build_router(*, engine, principal_dep: Callable[..., Principal],
             "mailboxes": mailboxes.list(principal.org_id),
             "settings": settings.get(principal.org_id),
             "categories": [c.to_json() for c in categories.list(principal.org_id)],
-            "classifier": gemini.status(),
+            "classifier": gemini.status(
+                settings.get(principal.org_id).get("classifierModel")),
             "errors": errors.open(principal.org_id),
             "stats": emails.stats(principal.org_id),
             # Shown permanently, so a wrong organisation is obvious rather than
@@ -214,10 +227,78 @@ def build_router(*, engine, principal_dep: Callable[..., Principal],
             raise HTTPException(
                 422, "A sync can look back between 1 and 30 days."
             )
-        settings.save(principal.org_id, lookback_days=body.lookbackDays,
-                      xero_connection=body.xeroConnection.strip() or "default",
-                      user=principal.email)
+        settings.save(
+            principal.org_id,
+            lookback_days=body.lookbackDays,
+            xero_connection=body.xeroConnection.strip() or "default",
+            xero_tenant_id=(body.xeroTenantId or "").strip() or None,
+            classifier_model=(body.classifierModel or "").strip() or None,
+            user=principal.email,
+        )
         return {"ok": True, "settings": settings.get(principal.org_id)}
+
+    @router.get("/xero/organisations")
+    def xero_organisations(principal: Principal = Depends(principal_dep)):
+        """Every Xero organisation the stored token can actually read.
+
+        A token often reaches several. The consent callback records only the
+        first one Xero lists, so the connection's own tenant is a guess — this
+        asks Xero directly and lets the org pick, which is the difference
+        between a name on a screen and the ledger being read.
+        """
+        guard(principal)
+        current = settings.get(principal.org_id)
+        try:
+            from .. import oauth
+            from ..xero import XeroCredentials
+
+            creds = XeroCredentials(principal.org_id, xero_connections(),
+                                    log=lambda m: None, apps=xero_apps())
+            token, connection_tenant = creds.xero(current["xeroConnection"])
+            found = oauth.tenants(token)
+        except Exception as exc:  # noqa: BLE001 — the message is the answer
+            # Not an HTTP error: "Xero is not connected yet" is an ordinary
+            # state of a settings screen, not a gateway failure, and raising
+            # made it a red line in the browser console instead of a sentence
+            # the reader can act on.
+            return {"organisations": [], "selected": None,
+                    "fromConnection": None, "error": str(exc)}
+
+        return {
+            "organisations": [
+                {"tenantId": t.get("tenantId"), "name": t.get("tenantName")}
+                for t in found
+            ],
+            "selected": current.get("xeroTenantId") or connection_tenant,
+            "fromConnection": connection_tenant,
+            "error": None,
+        }
+
+    @router.get("/classifier/models")
+    def classifier_models(principal: Principal = Depends(principal_dep)):
+        """Model names this API key can actually use.
+
+        Offered because the alternative is typing a name into a hosting
+        dashboard, redeploying, and reading the resulting 404s — which is
+        exactly how this endpoint came to exist.
+        """
+        guard(principal, "admin")
+        chosen = settings.get(principal.org_id).get("classifierModel")
+        try:
+            names = gemini.available_models()
+        except Exception as exc:  # noqa: BLE001 — the message is the answer
+            return {"configured": gemini.configured(), "models": [],
+                    "selected": chosen, "error": str(exc)}
+        return {"configured": True, "models": names, "selected": chosen,
+                "inUse": chosen or gemini.model_name(), "error": None}
+
+    @router.post("/classifier/reset")
+    def reset_classifier(principal: Principal = Depends(principal_dep)):
+        """Close the circuit after fixing the cause, without waiting it out."""
+        guard(principal, "member")
+        gemini.CIRCUIT.record_success()
+        return {"ok": True, "classifier": gemini.status(
+            settings.get(principal.org_id).get("classifierModel"))}
 
     # -- mailboxes -------------------------------------------------------
 

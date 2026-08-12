@@ -236,6 +236,12 @@ inbox_settings = Table(
            primary_key=True),
     Column("lookback_days", Integer, nullable=False, server_default="7"),
     Column("xero_connection", Text, nullable=False, server_default="default"),
+    # Which Xero organisation to read. Null falls back to the tenant recorded
+    # on the connection itself — which is a guess, because the consent callback
+    # stores whichever organisation Xero listed first.
+    Column("xero_tenant_id", Text),
+    # Null means the platform default from the environment.
+    Column("classifier_model", Text),
     Column("updated_by", Text),
     Column("updated_at", DateTime(timezone=True), server_default=func.now()),
 )

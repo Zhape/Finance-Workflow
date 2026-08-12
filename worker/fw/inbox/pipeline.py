@@ -20,7 +20,7 @@ from ..google import GoogleError
 from ..xero import XeroClient, XeroError
 from . import classify as classifier
 from . import render, review, templates
-from .gmail import MAX_MESSAGES_PER_SYNC, Mailbox
+from .gmail import Mailbox
 from .models import Classification, Code, Outcome, State
 from .text import display_name, strip_quoted, html_to_text, suppression_reason
 from .verify import lookup as xero_lookup
@@ -73,14 +73,11 @@ class Pipeline:
                        report: SyncReport) -> list[str]:
         """Pull recent messages into inbox_emails. Returns new email ids."""
         known = self.s["emails"].known_ids(mailbox["id"])
-        ids = client.list_recent(lookback_days)
-        report.fetched += len(ids)
-
-        fresh = [mid for mid in ids if mid not in known]
-        # A full page means Gmail had at least as much as we were willing to
-        # pull in one foreground request. Say so, rather than letting someone
-        # conclude the mailbox is empty.
-        if len(ids) >= MAX_MESSAGES_PER_SYNC:
+        # Filtering happens inside the listing, so each sync reaches further
+        # back rather than re-reading the newest page for ever.
+        fresh, more = client.list_recent(lookback_days, known=known)
+        report.fetched += len(fresh)
+        if more:
             report.more_waiting = True
 
         created: list[str] = []

@@ -67,6 +67,9 @@ class Code:
     CLS_BAD_CATEGORY = "CLS-002"      # model returned something off-schema
     CLS_UNAVAILABLE = "CLS-003"       # no key configured, or circuit open
     CLS_MALFORMED = "CLS-004"
+    # Its own code because it is a configuration mistake with a one-line fix,
+    # not an outage: the model name is not one this API key can reach.
+    CLS_BAD_MODEL = "CLS-005"
     XRO_TIMEOUT = "XRO-001"
     XRO_FAILED = "XRO-002"
     TPL_MISSING = "TPL-001"           # no template for this category

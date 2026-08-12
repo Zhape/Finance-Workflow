@@ -124,8 +124,12 @@ export const api = {
 	draftReply: (id) => send(`/api/inbox/emails/${encodeURIComponent(id)}/draft-reply`, 'POST'),
 	dismissInboxEmail: (id) =>
 		send(`/api/inbox/emails/${encodeURIComponent(id)}/dismiss`, 'POST'),
-	saveInboxSettings: (lookbackDays, xeroConnection) =>
-		send('/api/inbox/settings', 'PUT', { lookbackDays, xeroConnection }),
+	saveInboxSettings: (settings) => send('/api/inbox/settings', 'PUT', settings),
+	// Asks Xero and Google what this org can actually reach, rather than
+	// making someone guess an organisation name or a model name.
+	inboxXeroOrgs: (fetcher = fetch) => get('/api/inbox/xero/organisations', fetcher),
+	inboxModels: (fetcher = fetch) => get('/api/inbox/classifier/models', fetcher),
+	resetInboxClassifier: () => send('/api/inbox/classifier/reset', 'POST'),
 	inboxTemplates: (fetcher = fetch) => get('/api/inbox/templates', fetcher),
 	saveInboxTemplate: (variant, subject, body) =>
 		send('/api/inbox/templates', 'PUT', { variant, subject, body }),

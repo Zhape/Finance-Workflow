@@ -19,8 +19,26 @@
 	let draftSubject = $state('');
 	let draftBody = $state('');
 
+	let showSettings = $state(false);
+	let xeroOrgs = $state([]);
+	let xeroOrgError = $state('');
+	let models = $state([]);
+	let modelError = $state('');
+	let draftXeroTenant = $state('');
+	let draftModel = $state('');
+	let draftLookback = $state(7);
+
 	const mailboxes = $derived(status?.mailboxes ?? []);
 	const connected = $derived(mailboxes.length > 0);
+	// The organisation actually being read. Prefer the explicit choice; the
+	// name stored on the connection is only ever whichever one Xero listed
+	// first, so it can name a company we are not reading.
+	const selectedXeroName = $derived(
+		xeroOrgs.find((o) => o.tenantId === status?.settings?.xeroTenantId)?.name ??
+			status?.xero?.tenantName ??
+			status?.xero?.connection ??
+			'not set'
+	);
 	const inboxErrors = $derived(status?.errors ?? []);
 	const degraded = $derived(
 		status?.classifier && (!status.classifier.configured || status.classifier.circuitOpen)
@@ -104,6 +122,63 @@
 		} catch (e) {
 			error = e.message;
 		}
+	}
+
+	async function openSettings() {
+		showSettings = !showSettings;
+		if (!showSettings) return;
+		draftLookback = status?.settings?.lookbackDays ?? 7;
+		draftModel = status?.settings?.classifierModel ?? '';
+		// Both lists come from the providers themselves, so the choices offered
+		// are ones that provably work rather than names someone typed.
+		try {
+			const orgs = await api.inboxXeroOrgs();
+			xeroOrgs = orgs.organisations;
+			draftXeroTenant = orgs.selected ?? '';
+			xeroOrgError = orgs.error ?? '';
+		} catch (e) {
+			xeroOrgs = [];
+			xeroOrgError = e.message;
+		}
+		try {
+			const found = await api.inboxModels();
+			models = found.models;
+			modelError = found.error ?? '';
+		} catch (e) {
+			models = [];
+			modelError = e.message;
+		}
+	}
+
+	async function saveSettings() {
+		busy = true;
+		error = '';
+		try {
+			await api.saveInboxSettings({
+				lookbackDays: Number(draftLookback),
+				xeroConnection: status?.settings?.xeroConnection ?? 'default',
+				xeroTenantId: draftXeroTenant || null,
+				classifierModel: draftModel || null
+			});
+			status = await api.inboxStatus();
+			notice = 'Settings saved. Sync again to apply them.';
+			showSettings = false;
+		} catch (e) {
+			error = e.message;
+		}
+		busy = false;
+	}
+
+	async function retryClassifier() {
+		busy = true;
+		try {
+			const result = await api.resetInboxClassifier();
+			status = { ...status, classifier: result.classifier };
+			notice = 'Classifier re-enabled. Sync to try it again.';
+		} catch (e) {
+			error = e.message;
+		}
+		busy = false;
 	}
 
 	async function removeMailbox(mailbox) {
@@ -202,6 +277,7 @@
 	</div>
 	<div class="actions">
 		<a class="ghost" href="/inbox/templates">Templates</a>
+		<button class="ghost" onclick={openSettings}>Settings</button>
 		<!-- Always offered, not only when nothing is connected. Several
 		     mailboxes per organisation is the normal case — one per person,
 		     plus whatever a Google Group delivers — and hiding this once the
@@ -234,15 +310,27 @@
 	{/if}
 
 	{#if degraded}
-		<p class="banner warn">
-			{#if !status.classifier.configured}
-				No classifier is configured, so nothing is being categorised automatically. Every
-				email still arrives with a template attached — choose the category yourself.
-			{:else}
-				Classification is in degraded mode after repeated failures. Everything is going
-				straight to manual review.
+		<div class="banner warn">
+			<div>
+				{#if !status.classifier.configured}
+					No classifier is configured, so nothing is being categorised automatically.
+					Every email still arrives with a template attached — choose the category
+					yourself.
+				{:else}
+					Classification is paused after {status.classifier.consecutiveFailures}
+					consecutive failures. Everything is going straight to manual review.
+					<!-- The reason, not just the symptom. A banner that says only
+					     "degraded" tells someone they have a problem without
+					     telling them which one. -->
+					{#if status.classifier.lastError}
+						<br /><span class="reason">{status.classifier.lastError}</span>
+					{/if}
+				{/if}
+			</div>
+			{#if status.classifier.configured}
+				<button class="link" onclick={retryClassifier} disabled={busy}>Try again</button>
 			{/if}
-		</p>
+		</div>
 	{/if}
 
 	{#if inboxErrors.length}
@@ -262,6 +350,63 @@
 	{#if notice}<p class="banner ok">{notice}</p>{/if}
 	{#if error}<p class="banner err">{error}</p>{/if}
 
+	{#if showSettings}
+		<div class="box settings">
+			<h3>What this inbox reads</h3>
+			<div class="fields">
+				<label for="xero-org">
+					Xero organisation
+					<select id="xero-org" bind:value={draftXeroTenant} disabled={busy}>
+						{#if !xeroOrgs.length}
+							<option value="">{xeroOrgError || 'Loading…'}</option>
+						{/if}
+						{#each xeroOrgs as organisation (organisation.tenantId)}
+							<option value={organisation.tenantId}>{organisation.name}</option>
+						{/each}
+					</select>
+					<span class="hint">
+						Every organisation this Xero connection can reach. Invoice lookups run
+						against the one selected here.
+					</span>
+				</label>
+
+				<label for="model">
+					Classifier model
+					<select id="model" bind:value={draftModel} disabled={busy}>
+						<option value="">Platform default ({status?.classifier?.model})</option>
+						{#each models as name (name)}
+							<option value={name}>{name}</option>
+						{/each}
+					</select>
+					<span class="hint">
+						{#if modelError}
+							{modelError}
+						{:else}
+							Only models this API key can actually use are listed.
+						{/if}
+					</span>
+				</label>
+
+				<label for="lookback">
+					Look back
+					<select id="lookback" bind:value={draftLookback} disabled={busy}>
+						{#each [1, 3, 7, 14, 30] as days (days)}
+							<option value={days}>{days} day{days === 1 ? '' : 's'}</option>
+						{/each}
+					</select>
+					<span class="hint">
+						How far back a sync reads. One sync pulls up to 40 messages — press it
+						again to keep walking backwards through the window.
+					</span>
+				</label>
+			</div>
+			<div class="row">
+				<button onclick={saveSettings} disabled={busy}>Save</button>
+				<button class="ghost" onclick={() => (showSettings = false)}>Close</button>
+			</div>
+		</div>
+	{/if}
+
 	{#if connected}
 		<!-- Which mailboxes this screen is actually reading, and whether each
 		     one still works. Without this, a mailbox whose token has been
@@ -278,7 +423,9 @@
 				</span>
 			{/each}
 			{#if status?.xero?.connected}
-				<span class="mailbox xero">Xero: {status.xero.tenantName || status.xero.connection}</span>
+				<button class="mailbox xero" onclick={openSettings}>
+					Xero: {selectedXeroName} · change
+				</button>
 			{:else}
 				<span class="mailbox bad">Xero not connected — invoices cannot be checked</span>
 			{/if}
@@ -670,6 +817,33 @@
 	}
 	.x:hover {
 		color: var(--danger);
+	}
+
+	.settings h3 {
+		margin-bottom: 12px;
+	}
+	.settings .fields {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+		gap: 16px;
+	}
+	.settings label {
+		display: grid;
+		gap: 4px;
+		font-size: 0.82rem;
+		font-weight: 600;
+		margin: 0;
+	}
+	.settings .hint {
+		font-weight: 400;
+		font-size: 0.76rem;
+		color: var(--muted);
+		line-height: 1.4;
+	}
+	.reason {
+		font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		font-size: 0.78rem;
+		opacity: 0.9;
 	}
 
 	.split {

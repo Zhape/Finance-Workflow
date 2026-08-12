@@ -33,6 +33,12 @@ API = "https://gmail.googleapis.com/gmail/v1/users/me"
 # more is waiting and the button can simply be pressed again.
 MAX_MESSAGES_PER_SYNC = 40
 
+# How many ids a single sync will page over while looking for unseen ones.
+# Listing is cheap (ids only, 100 per call) and this only bites on a mailbox
+# where thousands of messages are already stored, so ten calls is a generous
+# ceiling that still bounds the request.
+MAX_SCANNED_PER_SYNC = 1000
+
 TIMEOUT = 30
 
 
@@ -133,30 +139,53 @@ class Mailbox:
         return resp.json()
 
     def list_recent(self, lookback_days: int = 7,
-                    limit: int = MAX_MESSAGES_PER_SYNC) -> list[str]:
-        """Message ids received recently, newest first.
+                    limit: int = MAX_MESSAGES_PER_SYNC,
+                    known: set[str] | None = None) -> tuple[list[str], bool]:
+        """Ids we have not already stored, newest first, plus "more remains".
 
-        Excludes anything we sent and the obvious noise categories before a
-        single message is fetched — the cheapest filter is the one that never
-        downloads the body.
+        `known` is what makes repeated syncing work. Gmail returns newest
+        first, so an earlier version that simply took the first `limit` ids and
+        filtered afterwards returned the *same* newest page every time: once
+        those were stored, every later sync fetched them, discarded them all as
+        known, and ingested nothing. Anything older than the first page was
+        unreachable no matter how many times you pressed the button.
+
+        Skipping known ids *during* pagination instead means each sync walks
+        further back through the window, so the button makes progress until
+        the whole lookback period has been read.
+
+        Excludes anything we sent and the obvious noise before a single message
+        is fetched — the cheapest filter is the one that never downloads a body.
         """
+        known = known or set()
         query = (
             f"newer_than:{max(int(lookback_days), 1)}d "
             "-in:sent -in:draft -in:trash -in:spam "
             "-category:promotions -category:social"
         )
-        ids: list[str] = []
+
+        fresh: list[str] = []
         page: str | None = None
-        while len(ids) < limit:
-            params = {"q": query, "maxResults": min(100, limit - len(ids))}
+        scanned = 0
+        while len(fresh) < limit and scanned < MAX_SCANNED_PER_SYNC:
+            params: dict[str, Any] = {"q": query, "maxResults": 100}
             if page:
                 params["pageToken"] = page
             found = self._call("GET", "/messages", params=params)
-            ids.extend(m["id"] for m in (found.get("messages") or []))
+            batch = found.get("messages") or []
+            scanned += len(batch)
+            for message in batch:
+                if message["id"] in known:
+                    continue
+                fresh.append(message["id"])
+                if len(fresh) >= limit:
+                    break
             page = found.get("nextPageToken")
             if not page:
-                break
-        return ids[:limit]
+                # The whole window has been walked; nothing older is waiting.
+                return fresh, False
+
+        return fresh, True
 
     def fetch(self, message_id: str) -> dict[str, Any]:
         """One message, parsed into the shape inbox_emails stores."""

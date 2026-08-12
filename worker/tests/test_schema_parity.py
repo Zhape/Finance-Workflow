@@ -25,6 +25,19 @@ _CREATE_TABLE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# A column added by a later migration is as real as one in the original
+# create. Without this, adding a column the honest way — `alter table` in a new
+# file rather than editing an applied migration — looks like schema drift.
+_ALTER_TABLE = re.compile(
+    r"alter table (?:only )?public\.(\w+)\s+(.*?);", re.IGNORECASE | re.DOTALL
+)
+_ADD_COLUMN = re.compile(
+    r"add column (?:if not exists )?(\w+)", re.IGNORECASE
+)
+_DROP_COLUMN = re.compile(
+    r"drop column (?:if exists )?(\w+)", re.IGNORECASE
+)
+
 
 def _strip_noise(sql: str) -> str:
     sql = re.sub(r"--[^\n]*", "", sql)               # line comments
@@ -61,11 +74,19 @@ def _columns(body: str) -> set[str]:
 
 
 def _migration_schema() -> dict[str, set[str]]:
+    """The schema the migrations describe, applied in filename order."""
     schema: dict[str, set[str]] = {}
     for path in sorted(MIGRATIONS.glob("*.sql")):
         sql = _strip_noise(path.read_text(encoding="utf-8"))
         for name, body in _CREATE_TABLE.findall(sql):
             schema[name] = _columns(body)
+        # Order matters: a table must exist before it can be altered, and the
+        # files are numbered so that it does.
+        for name, clause in _ALTER_TABLE.findall(sql):
+            if name not in schema:
+                continue        # e.g. `enable row level security`
+            schema[name] |= {c.lower() for c in _ADD_COLUMN.findall(clause)}
+            schema[name] -= {c.lower() for c in _DROP_COLUMN.findall(clause)}
     return schema
 
 

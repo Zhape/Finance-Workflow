@@ -142,14 +142,20 @@ class SettingsStore:
                     org_id=org_id, updated_at=_now()
                 ))
                 return {"lookbackDays": 7, "xeroConnection": "default",
+                        "xeroTenantId": None, "classifierModel": None,
                         "updatedBy": None}
         return {
             "lookbackDays": row.lookback_days,
             "xeroConnection": row.xero_connection,
+            # Null means "whatever tenant the connection recorded", which is a
+            # guess — the consent callback stores the first one Xero lists.
+            "xeroTenantId": row.xero_tenant_id,
+            "classifierModel": row.classifier_model,
             "updatedBy": row.updated_by,
         }
 
     def save(self, org_id: str, *, lookback_days: int, xero_connection: str,
+             xero_tenant_id: str | None, classifier_model: str | None,
              user: str) -> None:
         self.get(org_id)          # ensure the row exists
         with self._engine.begin() as conn:
@@ -158,6 +164,8 @@ class SettingsStore:
                 .where(inbox_settings.c.org_id == org_id)
                 .values(lookback_days=lookback_days,
                         xero_connection=xero_connection,
+                        xero_tenant_id=xero_tenant_id,
+                        classifier_model=classifier_model,
                         updated_by=user, updated_at=_now())
             )
 

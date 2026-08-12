@@ -53,8 +53,16 @@ class FakeGmail:
         self.address = "accounts@acme.test"
         self.fetched: list[str] = []
 
-    def list_recent(self, lookback_days=7, limit=40):
-        return list(self._messages)
+    def list_recent(self, lookback_days=7, limit=40, known=None):
+        """Mirrors the real signature: filters known ids, reports more waiting.
+
+        The filtering is the point. A fake that listed everything and let the
+        caller filter would hide the bug this shape exists to prevent — a sync
+        that can never reach mail older than its first page.
+        """
+        known = known or set()
+        fresh = [mid for mid in self._messages if mid not in known]
+        return fresh[:limit], len(fresh) > limit
 
     def fetch(self, message_id):
         self.fetched.append(message_id)
@@ -245,6 +253,44 @@ def test_the_lookup_outcome_is_recorded_on_every_email(
 
     email = stores["emails"].list(org)[0]
     assert stores["lookups"].latest(org, email["id"])["outcome"] == Outcome.FOUND
+
+
+def test_repeated_syncs_reach_older_mail(engine, org, stores, mailbox):
+    """A regression test for the bug that lost four days of a real inbox.
+
+    Gmail lists newest first. The original code took the first `limit` ids and
+    only then discarded ones already stored, so every sync after the first
+    fetched the same newest page, found it all known, and ingested nothing —
+    the cap was a permanent ceiling rather than a page size. Anything older was
+    unreachable no matter how many times the button was pressed.
+
+    Filtering inside the listing makes each sync walk further back, so the
+    whole lookback window is eventually read.
+    """
+    total = 95
+    messages = [
+        dict(gmail_message(f"m{n}"), gmail_thread_id=f"t{n}")
+        for n in range(total)
+    ]
+    gmail = FakeGmail(messages)
+    pipeline = build(org, stores, FakeClassifier(GOOD_ANSWER), FakeXero([INVOICE]))
+
+    first = run_sync(pipeline, mailbox, gmail)
+    assert first.ingested == 40
+    assert first.more_waiting is True, "should admit more is waiting"
+
+    second = run_sync(pipeline, mailbox, gmail)
+    assert second.ingested == 40, "the second sync must reach new mail"
+
+    third = run_sync(pipeline, mailbox, gmail)
+    assert third.ingested == total - 80
+    assert third.more_waiting is False, "the window is now fully read"
+
+    stored = stores["emails"].list(org, limit=500)
+    assert len(stored) == total
+    # Every message fetched exactly once across all three syncs.
+    assert len(gmail.fetched) == total
+    assert len(set(gmail.fetched)) == total
 
 
 def test_syncing_twice_changes_nothing(engine, org, stores, mailbox):
