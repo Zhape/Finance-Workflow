@@ -12,8 +12,11 @@ services:
   - type: web
     name: finance-workflows-worker
     runtime: docker
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    # Both paths are relative to the repository root, which is the only place
+    # Render looks for this file. The worker lives in a subdirectory, so they
+    # are spelled out rather than relying on rootDir.
+    dockerfilePath: ./worker/Dockerfile
+    dockerContext: ./worker
     region: singapore
     plan: free
     healthCheckPath: /health
