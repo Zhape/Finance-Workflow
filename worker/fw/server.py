@@ -103,6 +103,25 @@ def _mailer(org_id: str):
                                log=lambda m: None)
 
 
+def _action_for(workflow_key: str, org_id: str) -> dict[str, str]:
+    """The approve button's wording for this workflow, in this org's state."""
+    try:
+        module = workflows.get(workflow_key)
+    except KeyError:
+        return {"label": "Approve", "hint": ""}
+    decide = getattr(module, "approve_action", None)
+    if decide:
+        return decide(_mailer(org_id) is not None)
+    return {"label": module.SPEC.approve_label, "hint": ""}
+
+
+def _run_json(run: dict | None, org_id: str) -> dict | None:
+    if run is None:
+        return None
+    run["action"] = _action_for(run["workflow"], org_id)
+    return run
+
+
 def _defaults_for(module):
     """The wording a workflow ships with, if it has any."""
     getter = getattr(module, "default_templates", None)
@@ -505,14 +524,14 @@ def start_run(body: StartRun, principal: Principal = Depends(me)):
         result = POOL.submit(module.run, params, ctx).result()
     except (XeroError, EncryptionError, ValueError) as exc:
         RUNS.fail(principal.org_id, run_id, str(exc), [])
-        return RUNS.get(principal.org_id, run_id)
+        return _run_json(RUNS.get(principal.org_id, run_id), principal.org_id)
     except Exception as exc:  # noqa: BLE001
         RUNS.fail(principal.org_id, run_id, str(exc),
                   [traceback.format_exc(limit=3)])
-        return RUNS.get(principal.org_id, run_id)
+        return _run_json(RUNS.get(principal.org_id, run_id), principal.org_id)
 
     RUNS.finish_pull(principal.org_id, run_id, result)
-    return RUNS.get(principal.org_id, run_id)
+    return _run_json(RUNS.get(principal.org_id, run_id), principal.org_id)
 
 
 @app.get("/api/runs/{run_id}")
@@ -520,7 +539,7 @@ def get_run(run_id: str, principal: Principal = Depends(me)):
     run = RUNS.get(principal.org_id, run_id)
     if run is None:
         raise HTTPException(404, "Run not found")
-    return run
+    return _run_json(run, principal.org_id)
 
 
 @app.post("/api/runs/{run_id}/approve")
@@ -566,7 +585,7 @@ def approve(run_id: str, body: Approve, principal: Principal = Depends(me)):
 
     RUNS.complete(principal.org_id, run_id, result,
                   [r["id"] for r in chosen], principal.email)
-    return RUNS.get(principal.org_id, run_id)
+    return _run_json(RUNS.get(principal.org_id, run_id), principal.org_id)
 
 
 @app.get("/api/runs/{run_id}/artifact")

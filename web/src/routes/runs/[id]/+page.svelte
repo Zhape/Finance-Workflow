@@ -69,9 +69,16 @@
 			Download {run.artifactName}
 		</button>
 	</div>
-	<p class="note">
-		Upload this file to your bank as usual. This app cannot move money — it only prepares the file.
-	</p>
+	{#if run.workflow === 'weekly-payrun'}
+		<p class="note">
+			Upload this file to your bank as usual. This app cannot move money — it only prepares
+			the file.
+		</p>
+	{:else}
+		<p class="note">
+			Nothing has been sent. Review each draft in Gmail and send it yourself.
+		</p>
+	{/if}
 {/if}
 
 {#if run.rows.length > 0}
@@ -121,13 +128,16 @@
 	</div>
 
 	{#if run.status === 'needs_approval'}
+		{#if run.action?.hint}
+			<p class="actionhint">{run.action.hint}</p>
+		{/if}
 		<div class="approve">
 			<div class="count">
 				<strong>{selected.size}</strong> of {run.rows.length} selected · total
 				<strong>{money(total)}</strong>
 			</div>
 			<button onclick={approve} disabled={busy || selected.size === 0}>
-				{busy ? 'Building file…' : 'Approve and build bank file'}
+				{busy ? 'Working…' : (run.action?.label ?? 'Approve')}
 			</button>
 		</div>
 	{/if}
@@ -237,6 +247,12 @@
 	.flag.bad {
 		background: #fdecea;
 		color: var(--danger);
+	}
+	.actionhint {
+		font-size: 0.82rem;
+		color: var(--muted);
+		margin: 14px 0 0;
+		line-height: 1.5;
 	}
 	.approve {
 		display: flex;

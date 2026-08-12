@@ -115,6 +115,11 @@ class WorkflowSpec:
     # True when run() returns rows for a human to approve before anything
     # leaves the building.
     requires_approval: bool = True
+    # What approving actually does, in the workflow's own words. The review
+    # screen is generic, so a button reading "build bank file" on a chase-up
+    # is the platform describing the wrong workflow to the person about to
+    # trigger it.
+    approve_label: str = "Approve"
 
     def parse(self, raw: dict[str, Any]) -> dict[str, Any]:
         """Validate and coerce the submitted form into workflow params."""
@@ -136,6 +141,7 @@ class WorkflowSpec:
             "description": self.description,
             "integrations": self.integrations,
             "requiresApproval": self.requires_approval,
+            "approveLabel": self.approve_label,
             "params": [
                 {
                     "name": p.name,

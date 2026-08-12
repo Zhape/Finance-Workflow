@@ -44,6 +44,7 @@ SPEC = WorkflowSpec(
     ),
     integrations=["xero"],
     requires_approval=True,
+    approve_label="Approve and draft emails",
     params=[
         ParamSpec(
             name="connection",
@@ -192,6 +193,25 @@ def first_name(contact_name: str) -> str:
     if len(parts) > 1 and parts[0].isalpha() and parts[0].istitle() and len(parts) <= 3:
         return parts[0]
     return name
+
+
+def approve_action(mailer_connected: bool) -> dict[str, str]:
+    """What the approve button should say, given what is actually connected.
+
+    Without Gmail the run still produces the chase list, so the button stays
+    enabled -- but it must not promise drafts it cannot create.
+    """
+    if mailer_connected:
+        return {
+            "label": "Approve and draft emails",
+            "hint": "Creates one Gmail draft per customer. Nothing is sent — "
+                    "you review and send from Gmail.",
+        }
+    return {
+        "label": "Approve and download chase list",
+        "hint": "Gmail is not connected, so no drafts will be created. "
+                "Connect it in Settings to draft these instead.",
+    }
 
 
 def default_templates() -> dict[str, dict[str, str]]:

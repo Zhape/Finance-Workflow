@@ -57,6 +57,7 @@ SPEC = WorkflowSpec(
     ),
     integrations=["xero"],
     requires_approval=True,
+    approve_label="Approve and build bank file",
     params=[
         ParamSpec(
             name="region",
