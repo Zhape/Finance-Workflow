@@ -110,6 +110,12 @@ def health():
         with ENGINE.connect() as conn:
             conn.execute(text("select 1"))
     except Exception as exc:  # noqa: BLE001
+        # Log it as well as returning it. A platform health check only records
+        # the status code, so a body-only reason leaves "503" in the logs with
+        # no way to tell a wrong password from an unreachable host.
+        detail = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
+        print(f"[health] database unreachable: {type(exc).__name__}: {detail}",
+              flush=True)
         raise HTTPException(503, f"database unreachable: {type(exc).__name__}")
     return {"status": "ok"}
 
