@@ -61,6 +61,22 @@
 		busy = false;
 	}
 
+	async function removeApp(registered) {
+		const shown = registered.label || registered.name;
+		if (!confirm(`Remove ${shown}? Nothing is connected through it.`)) return;
+		busy = true;
+		notice = '';
+		error = '';
+		try {
+			await api.clearProviderApp(provider, registered.name);
+			notice = `${shown} removed.`;
+			await onchange();
+		} catch (e) {
+			error = e.message;
+		}
+		busy = false;
+	}
+
 	async function revert() {
 		busy = true;
 		notice = '';
@@ -84,7 +100,10 @@
 		<div>
 			<div class="name">{title}</div>
 			<div class="meta">
-				{#if own}
+				{#if own && multiple}
+					<strong>{apps.length}</strong> application{apps.length === 1 ? '' : 's'}
+					registered by this organisation.
+				{:else if own}
 					Using <strong>this organisation's own app</strong> · Client ID
 					<code>{app.clientId}</code>
 					{#if app.updatedBy}· set by {app.updatedBy}{/if}
@@ -94,12 +113,12 @@
 			</div>
 		</div>
 		<div class="actions">
-			{#if own && isAdmin}
+			{#if own && isAdmin && !multiple}
 				<button class="ghost" disabled={busy} onclick={revert}>Use shared app</button>
 			{/if}
 			{#if isAdmin}
 				<button class="ghost" onclick={() => (open = !open)} aria-expanded={open}>
-					{open ? 'Cancel' : own ? 'Replace' : 'Use my own'}
+					{open ? 'Cancel' : own ? (multiple ? 'Add another' : 'Replace') : 'Use my own'}
 				</button>
 			{/if}
 		</div>
@@ -114,6 +133,22 @@
 					<span class="cap" class:full={registered.full}>
 						{registered.organisations.length} / {registered.capacity} organisations
 					</span>
+					{#if isAdmin}
+						<!-- Removable only while nothing depends on it. A refresh
+						     token cannot outlive the client that issued it, so
+						     removing an app in use breaks those connections at
+						     their next refresh rather than visibly now. -->
+						<button
+							class="remove"
+							disabled={busy || registered.organisations.length > 0}
+							title={registered.organisations.length > 0
+								? 'Disconnect its organisations first — their tokens can only be refreshed by this application.'
+								: 'Remove this application'}
+							onclick={() => removeApp(registered)}
+						>
+							Remove
+						</button>
+					{/if}
 				</li>
 			{/each}
 		</ul>
@@ -303,6 +338,17 @@
 		margin-left: auto;
 		color: var(--muted);
 		font-size: 0.78rem;
+	}
+	.remove {
+		background: none;
+		border: 1px solid var(--line);
+		color: var(--muted);
+		font-size: 0.76rem;
+		padding: 3px 10px;
+	}
+	.remove:not(:disabled):hover {
+		border-color: var(--danger);
+		color: var(--danger);
 	}
 	.cap.full {
 		color: var(--warn);
