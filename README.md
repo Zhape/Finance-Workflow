@@ -85,53 +85,33 @@ cd worker && ./.venv/Scripts/python.exe -m pytest tests -q
 
 ## Deployment
 
-The web app builds as a **static SPA** (`@sveltejs/adapter-static`). Every
-route sets `ssr = false` and all data comes from the worker, so there is
-nothing for a server to render — and no Node runtime on Vercel, which is what
-removed the `adapter-vercel` "Unsupported Node.js version: v24" build failure.
-`vercel.json` pins `outputDirectory: build` and an SPA rewrite, so Vercel does
-not apply its SvelteKit preset (which expects `.vercel/output`).
+Both halves live on Render, deployed from one blueprint (`render.yaml`) on one
+`git push`.
 
-Verified against the real production build via `vite preview`: the index,
-`/settings`, and a deep-linked `/runs/<id>` all render, including the download.
+| | |
+| --- | --- |
+| Web | https://finance-workflows-web.onrender.com |
+| Worker | https://finance-workflows-worker.onrender.com |
+| Database | Supabase `zacgedjltfkiyfydghtp`, ap-southeast-1 |
 
-**Live:** https://finance-workflows.vercel.app (project `finance-workflows`,
-team `to-the-moon4`).
+The web app is a **static SPA** (`@sveltejs/adapter-static`): every route sets
+`ssr = false` and all data comes from the worker, so there is nothing for a
+server to render -- and no Node runtime, which is what removed the
+`adapter-vercel` "Unsupported Node.js version" build failure.
 
-`PUBLIC_API_BASE` is unset, so it currently shows "No worker configured"
-rather than pretending to work.
+The static site rewrites `/api/*` to the worker. That single line is why there
+is no CORS configuration, no cross-origin auth header handling, and no
+per-environment API base URL: the browser only ever talks to one origin.
+`API_BASE` in `src/lib/config.js` is empty and should stay that way unless the
+two are ever split across hosts again.
 
-### The worker
+The worker is a container, not a function, because a Xero pull outlives any
+serverless timeout. On Render's free plan it sleeps after ~15 minutes idle, so
+the first request after a quiet spell takes ~50s. `fly.toml` is kept for the
+always-on alternative (~$2-5/month, no cold starts); the Dockerfile is the same.
 
-The worker needs a host that keeps a process alive, because a Xero pull
-outlives a serverless timeout. `Dockerfile` is portable; the host is a config
-choice, not a rewrite.
-
-- **`render.yaml`** — free plan, Singapore. Spins down after ~15 minutes idle,
-  so the first request after a quiet spell takes ~50s. Right for validating
-  demand, wrong once anyone depends on it.
-- **`fly.toml`** — always-on, ~$2-5/month, Singapore (`sin`), suspend-on-idle
-  for ~1s wakes. Fly has no free tier as of late 2024.
-
-Both sit next to the Supabase project (`ap-southeast-1`) so a workflow run's
-database round-trips stay in-region.
-
-```bash
-cd worker && fly launch --no-deploy && fly deploy
-```
-
-Then wire the two halves together:
-
-1. `PUBLIC_API_BASE` on Vercel → the worker's URL, and redeploy.
-2. `FW_WEB_ORIGIN` on the worker → `https://finance-workflows.vercel.app`.
-3. `FW_XERO_REDIRECT_URI` on the worker → `<worker-url>/api/connections/xero/callback`,
-   and register that exact URI in the Xero app.
-4. `PUBLIC_SUPABASE_URL` / `PUBLIC_SUPABASE_ANON_KEY` on Vercel, and
-   `SUPABASE_URL` on the worker, so real JWTs are verified.
-
-**`FW_ENV` must not be `dev` in production.** It gates the unauthenticated dev
-principal. It fails closed — an unset `FW_ENV` rejects anonymous callers — but
-setting it to `dev` on a public host would hand every visitor a real session.
+`/health` returns `{"status":"ok"}` only after a `select 1` against the
+database, so a green health check proves the worker reached Supabase.
 
 ## Environment
 
