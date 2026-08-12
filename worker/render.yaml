@@ -1,0 +1,38 @@
+# Render — the free option, for testing the idea at low traffic.
+#
+# The free plan spins the service down after ~15 minutes idle, so the first
+# request after a quiet period takes roughly 50 seconds. That is survivable
+# while validating demand and not survivable once anyone depends on it; move
+# to a paid instance (or Fly) at that point. Nothing else changes.
+#
+# Region: Singapore, matching the Supabase project (ap-southeast-1), so
+# database round-trips inside a workflow run stay in-region.
+
+services:
+  - type: web
+    name: finance-workflows-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    region: singapore
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # Set every one of these in the Render dashboard, not here. Secrets in a
+      # committed file are how they end up in a git history for ever.
+      - key: FW_ENV
+        value: production          # never "dev": that enables the dev principal
+      - key: FW_DATABASE_URL
+        sync: false                # Supabase Postgres connection string
+      - key: FW_ENCRYPTION_KEY
+        sync: false                # Fernet key; rotating it orphans stored tokens
+      - key: FW_XERO_CLIENT_ID
+        sync: false
+      - key: FW_XERO_CLIENT_SECRET
+        sync: false
+      - key: FW_XERO_REDIRECT_URI
+        sync: false                # https://<this-service>.onrender.com/api/connections/xero/callback
+      - key: FW_WEB_ORIGIN
+        value: https://finance-workflows.vercel.app
+      - key: SUPABASE_URL
+        sync: false                # enables real JWT verification

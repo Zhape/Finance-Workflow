@@ -1,0 +1,217 @@
+"""Xero access for the hosted worker.
+
+Two changes from the desktop `auth.py`, both forced by running server-side:
+
+1. No interactive authorise flow here.  A worker process must never open a
+   browser or bind a loopback port -- the consent flow belongs in the web app,
+   which stores the resulting refresh token against the org.  This module only
+   *refreshes*, which is the only thing a background run legitimately needs.
+
+2. Tokens come from and go back to a `TokenStore`, not %APPDATA%.  The dev
+   store is a JSON file (so this spike can reuse the existing desktop token);
+   the hosted store is an encrypted per-org row.  Same interface.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import time
+from pathlib import Path
+from typing import Any, Protocol
+
+import requests
+
+TOKEN_URL = "https://identity.xero.com/connect/token"
+CONNECTIONS_URL = "https://api.xero.com/connections"
+API_BASE = "https://api.xero.com/api.xro/2.0"
+
+_RETRY_STATUSES = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+
+
+class XeroError(RuntimeError):
+    pass
+
+
+class TokenStore(Protocol):
+    def load(self, org_id: str, connection: str) -> dict[str, Any] | None: ...
+    def save(self, org_id: str, connection: str, token: dict[str, Any]) -> None: ...
+
+
+class FileTokenStore:
+    """Dev-only store: one JSON file per connection, desktop-app format.
+
+    Lets the spike run against a real Xero org without re-authorising.
+    Not for hosted use -- there is no encryption and no tenancy boundary.
+    """
+
+    def __init__(self, directory: str | Path):
+        self._dir = Path(directory)
+
+    def _path(self, org_id: str, connection: str) -> Path:
+        name = "token.json" if connection == "default" else f"token_{connection}.json"
+        return self._dir / name
+
+    def load(self, org_id: str, connection: str) -> dict[str, Any] | None:
+        p = self._path(org_id, connection)
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def save(self, org_id: str, connection: str, token: dict[str, Any]) -> None:
+        self._path(org_id, connection).write_text(
+            json.dumps(token, indent=2), encoding="utf-8"
+        )
+
+
+class XeroCredentials:
+    """Implements the CredentialProvider protocol for Xero."""
+
+    def __init__(self, org_id: str, store: TokenStore, log=print):
+        # The Xero app is the platform's, shared by every org; only the token
+        # is per-org. See oauth.py for why.
+        self._org_id = org_id
+        self._store = store
+        self._log = log
+
+    def xero(self, connection: str = "default") -> tuple[str, str]:
+        token = self._store.load(self._org_id, connection)
+        if not token or not token.get("refresh_token"):
+            raise XeroError(
+                f"No Xero connection {connection!r} for this organisation. "
+                f"Connect Xero in Settings first."
+            )
+
+        obtained = token.get("obtained_at", 0)
+        expires_in = token.get("expires_in", 1800)
+        if time.time() > obtained + expires_in - 120:
+            token = self._refresh(connection, token)
+
+        tenant_id = token.get("tenant_id")
+        if not tenant_id:
+            tenant_id = self._fetch_tenant(token["access_token"])
+            token["tenant_id"] = tenant_id
+            self._store.save(self._org_id, connection, token)
+
+        return token["access_token"], tenant_id
+
+    def _refresh(self, connection: str, token: dict) -> dict:
+        import os
+
+        client_id = os.environ.get("FW_XERO_CLIENT_ID", "").strip()
+        client_secret = os.environ.get("FW_XERO_CLIENT_SECRET", "").strip()
+        if not client_id:
+            raise XeroError("FW_XERO_CLIENT_ID is not set on the worker.")
+
+        self._log(f"[xero] refreshing {connection} token")
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": token["refresh_token"],
+            "client_id": client_id,
+        }
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        if client_secret:
+            basic = base64.b64encode(
+                f"{client_id}:{client_secret}".encode("ascii")
+            ).decode("ascii")
+            headers["Authorization"] = "Basic " + basic
+            data.pop("client_id", None)
+
+        resp = requests.post(TOKEN_URL, data=data, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            raise XeroError(
+                f"Xero token refresh failed ({resp.status_code}): {resp.text}"
+            )
+        new = resp.json()
+        new["obtained_at"] = time.time()
+        new["tenant_id"] = token.get("tenant_id")
+        new["tenant_name"] = token.get("tenant_name")
+        self._store.save(self._org_id, connection, new)
+        return new
+
+    @staticmethod
+    def _fetch_tenant(access_token: str) -> str:
+        resp = requests.get(
+            CONNECTIONS_URL,
+            headers={
+                "Authorization": "Bearer " + access_token,
+                "Accept": "application/json",
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise XeroError("Could not list Xero connections: " + resp.text)
+        conns = resp.json()
+        if not conns:
+            raise XeroError("No Xero organisations are connected to this app.")
+        return conns[0]["tenantId"]
+
+
+class XeroClient:
+    """Read-only Xero Accounting API client.
+
+    Carried over from the desktop app unchanged apart from the module it
+    lives in -- it was already stateless and server-safe.
+    """
+
+    def __init__(self, access_token: str, tenant_id: str):
+        self._headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Xero-Tenant-Id": tenant_id,
+            "Accept": "application/json",
+        }
+
+    def get_bills(self, statuses: list[str] | None = None) -> list[dict[str, Any]]:
+        """All unpaid Accounts Payable bills, paginating until exhausted."""
+        statuses = statuses or ["AUTHORISED"]
+        bills: list[dict] = []
+        page = 1
+        while True:
+            batch = self._get(
+                "Invoices",
+                {
+                    "Type": "ACCPAY",
+                    "Statuses": ",".join(statuses),
+                    "page": page,
+                    "summaryOnly": "false",
+                },
+            ).get("Invoices", [])
+            bills.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return bills
+
+    def _get(self, resource: str, params: dict | None = None) -> dict[str, Any]:
+        url = f"{API_BASE}/{resource}"
+        for attempt in range(1, _MAX_RETRIES + 1):
+            resp = requests.get(url, headers=self._headers, params=params, timeout=60)
+            if resp.ok:
+                return resp.json()
+
+            if resp.status_code == 401:
+                raise XeroError(
+                    "Xero returned 401 Unauthorised — the access token has expired "
+                    "or been revoked. Reconnect Xero for this organisation."
+                )
+            if resp.status_code == 403:
+                raise XeroError(
+                    "Xero returned 403 Forbidden — check that "
+                    "'accounting.invoices.read' is enabled on the Xero app."
+                )
+            if resp.status_code in _RETRY_STATUSES and attempt < _MAX_RETRIES:
+                retry_after = min(int(resp.headers.get("Retry-After", 2**attempt)), 60)
+                time.sleep(retry_after)
+                continue
+
+            try:
+                detail = resp.json()
+            except ValueError:
+                detail = resp.text
+            raise XeroError(f"Xero API error {resp.status_code} on {resource}: {detail}")
+
+        raise XeroError(f"Failed to GET {resource} after {_MAX_RETRIES} attempts.")

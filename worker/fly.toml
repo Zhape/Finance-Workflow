@@ -1,0 +1,40 @@
+# Fly — the always-on option, for when cold starts stop being acceptable.
+# Roughly $2-5/month for this machine. Fly has no free tier as of late 2024.
+#
+# Same Dockerfile as Render; only this file differs.
+
+app = "finance-workflows-worker"
+primary_region = "sin"   # Singapore, matching the Supabase project region
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  FW_ENV = "production"
+  FW_WEB_ORIGIN = "https://finance-workflows.vercel.app"
+  PORT = "8000"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_start_machines = true
+  # "suspend" keeps the machine's memory image, so a wake is ~1s rather than a
+  # full boot. Set min_machines_running = 1 to remove the wake entirely.
+  auto_stop_machines = "suspend"
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# Secrets are NOT set here. Use:
+#   fly secrets set FW_DATABASE_URL=... FW_ENCRYPTION_KEY=... \
+#                   FW_XERO_CLIENT_ID=... FW_XERO_CLIENT_SECRET=... \
+#                   FW_XERO_REDIRECT_URI=... SUPABASE_URL=...
